@@ -1,6 +1,9 @@
 import asyncio
+import atexit
 import functools
 import logging
+import os
+import sys
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -891,7 +894,40 @@ async def post_init(application):
 
 # --- Main ---
 
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
+
+
+def _acquire_lock():
+    """Ensure only one bot instance runs at a time using a PID lock file."""
+    if os.path.exists(LOCK_FILE):
+        with open(LOCK_FILE) as f:
+            old_pid = f.read().strip()
+        # Check if that process is still alive
+        try:
+            os.kill(int(old_pid), 0)
+        except (OSError, ValueError):
+            pass  # Process is dead, stale lock — we can proceed
+        else:
+            logger.error("Bot is already running (PID %s). Exiting.", old_pid)
+            sys.exit(1)
+
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    atexit.register(_release_lock)
+
+
+def _release_lock():
+    """Remove the lock file on exit."""
+    try:
+        os.remove(LOCK_FILE)
+    except OSError:
+        pass
+
+
 def main():
+    _acquire_lock()
+
     # Connect to qBittorrent
     try:
         version = qb.test_connection()
