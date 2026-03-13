@@ -195,6 +195,39 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
     if not query:
         return
+
+    # Check if we're waiting for a custom TV path
+    if context.user_data.get("awaiting_tv_path"):
+        context.user_data["awaiting_tv_path"] = False
+        tv_dl = context.user_data.get("pending_tv_download")
+        results = context.user_data.get("pending_results", [])
+
+        if not tv_dl or tv_dl["idx"] >= len(results):
+            await update.message.reply_text("Session expired. Send your search again.")
+            return
+
+        chosen = results[tv_dl["idx"]]
+        tv_sub = query.strip("/")
+        try:
+            await _add_torrent(chosen.magnet, "tv", tv_sub)
+        except Exception as e:
+            await update.message.reply_text(f"Failed to add torrent: {e}")
+            return
+
+        save_path = cfg["paths"]["tv"]
+        if tv_sub:
+            save_path = f"{save_path}/{tv_sub}"
+        await update.message.reply_text(
+            f"Adding: {chosen.title}\n"
+            f"({chosen.size_display}, {chosen.seeders} seeders)\n\n"
+            f"Download started! Category: tv -> {save_path}"
+        )
+        context.user_data.pop("pending_results", None)
+        context.user_data.pop("pending_media_type", None)
+        context.user_data.pop("pending_query", None)
+        context.user_data.pop("pending_tv_download", None)
+        return
+
     media_type = detect_media_type(query)
     if media_type == "tv":
         # Clear episode pattern — skip the prompt
@@ -375,7 +408,7 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Download the selected torrent."""
+    """Download the selected torrent (or prompt for TV path confirmation)."""
     query = update.callback_query
     await query.answer()
 
@@ -393,16 +426,37 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chosen = results[idx]
-    tv_sub = extract_tv_path(chosen.title) if media_type == "tv" else ""
+
+    if media_type == "tv":
+        # Show path confirmation before downloading
+        tv_sub = extract_tv_path(chosen.title)
+        context.user_data["pending_tv_download"] = {
+            "idx": idx,
+            "tv_sub": tv_sub,
+        }
+        base = cfg["paths"]["tv"]
+        full_path = f"{base}/{tv_sub}" if tv_sub else base
+        buttons = [
+            [InlineKeyboardButton("Confirm", callback_data="tvpath:confirm")],
+            [InlineKeyboardButton("Change path", callback_data="tvpath:change")],
+            [InlineKeyboardButton("< Back", callback_data=f"pick:{idx}")],
+        ]
+        await query.edit_message_text(
+            f"Title: {chosen.title}\n\n"
+            f"Download path:\n{full_path}\n\n"
+            f"Is this correct?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    # Movies — download immediately
     try:
-        await _add_torrent(chosen.magnet, media_type, tv_sub)
+        await _add_torrent(chosen.magnet, media_type, "")
     except Exception as e:
         await query.edit_message_text(f"Failed to add torrent: {e}")
         return
 
-    save_path = cfg["paths"]["tv"] if media_type == "tv" else cfg["paths"]["movies"]
-    if tv_sub:
-        save_path = f"{save_path}/{tv_sub}"
+    save_path = cfg["paths"]["movies"]
     await query.edit_message_text(
         f"Adding: {chosen.title}\n"
         f"({chosen.size_display}, {chosen.seeders} seeders)\n\n"
@@ -411,6 +465,55 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_results", None)
     context.user_data.pop("pending_media_type", None)
     context.user_data.pop("pending_query", None)
+
+
+async def callback_tvpath(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle TV path confirmation or change request."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in ALLOWED_USERS:
+        await query.edit_message_text("Unauthorized.")
+        return
+
+    action = query.data.split(":")[1]
+    tv_dl = context.user_data.get("pending_tv_download")
+    results = context.user_data.get("pending_results", [])
+
+    if not tv_dl or tv_dl["idx"] >= len(results):
+        await query.edit_message_text("Session expired. Search again.")
+        return
+
+    chosen = results[tv_dl["idx"]]
+
+    if action == "confirm":
+        tv_sub = tv_dl["tv_sub"]
+        try:
+            await _add_torrent(chosen.magnet, "tv", tv_sub)
+        except Exception as e:
+            await query.edit_message_text(f"Failed to add torrent: {e}")
+            return
+
+        save_path = cfg["paths"]["tv"]
+        if tv_sub:
+            save_path = f"{save_path}/{tv_sub}"
+        await query.edit_message_text(
+            f"Adding: {chosen.title}\n"
+            f"({chosen.size_display}, {chosen.seeders} seeders)\n\n"
+            f"Download started! Category: tv -> {save_path}"
+        )
+        context.user_data.pop("pending_results", None)
+        context.user_data.pop("pending_media_type", None)
+        context.user_data.pop("pending_query", None)
+        context.user_data.pop("pending_tv_download", None)
+
+    elif action == "change":
+        context.user_data["awaiting_tv_path"] = True
+        await query.edit_message_text(
+            f"Current path: {tv_dl['tv_sub']}\n\n"
+            "Type the new subfolder path (e.g. Show Name/Season 01):"
+        )
 
 
 @authorized
@@ -501,6 +604,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_page, pattern=r"^page:"))
     app.add_handler(CallbackQueryHandler(callback_pick, pattern=r"^pick:"))
     app.add_handler(CallbackQueryHandler(callback_download, pattern=r"^dl:"))
+    app.add_handler(CallbackQueryHandler(callback_tvpath, pattern=r"^tvpath:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot starting...")
