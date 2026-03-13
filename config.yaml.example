@@ -23,4 +23,4 @@ preferences:
   quality: ["1080p", "720p", "2160p"]
   min_seeders: 3
   max_results: 5
-  default_mode: "auto"   # "auto" or "choose"
+  default_mode: "choose"   # "auto" or "choose"
