@@ -55,6 +55,7 @@ def _parse_torznab(xml_text: str) -> list[TorrentResult]:
         pub_date = item.findtext("pubDate", "")
         description = item.findtext("description", "")
         info_url = item.findtext("comments", "") or item.findtext("guid", "")
+        imdb_id = _get_torznab_attr(item, "imdbid")
 
         results.append(TorrentResult(
             title=title,
@@ -66,6 +67,7 @@ def _parse_torznab(xml_text: str) -> list[TorrentResult]:
             description=description,
             leechers=int(leechers) if leechers else 0,
             info_url=info_url,
+            imdb_id=imdb_id,
         ))
 
     return results

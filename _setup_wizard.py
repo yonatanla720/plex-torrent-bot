@@ -974,6 +974,43 @@ def main():
     else:
         info("Plex integration skipped")
 
+    # =========================================
+    #   Step 6: TMDB (optional)
+    # =========================================
+
+    print()
+    print("-----------------------------------------")
+    print("  Step 6: TMDB poster art (optional)")
+    print("-----------------------------------------")
+    print()
+    print("  The bot can show movie/TV poster art in search results")
+    print("  using The Movie Database (TMDB) API (free).")
+    print()
+    print("  To get an API key:")
+    print("    1. Create an account at https://www.themoviedb.org/signup")
+    print("    2. Go to https://www.themoviedb.org/settings/api")
+    print("    3. Request an API key (choose 'Developer', approval is instant)")
+    print("    4. Copy the 'API Key' (NOT the 'Read Access Token')")
+    print()
+
+    current_tmdb_key = read_cfg("tmdb.api_key")
+    if current_tmdb_key:
+        info("TMDB API key already set")
+        if ask_yes_no("Change it?", default_yes=False):
+            tkey = ask("Paste TMDB API key: ")
+            if tkey:
+                write_cfg("tmdb.api_key", tkey)
+                info("TMDB API key saved")
+    elif ask_yes_no("Set up TMDB poster art?"):
+        tkey = ask("Paste TMDB API key (or Enter to skip): ")
+        if tkey:
+            write_cfg("tmdb.api_key", tkey)
+            info("TMDB API key saved")
+        else:
+            warn("Skipped — set tmdb.api_key in config.yaml later")
+    else:
+        info("TMDB poster art skipped")
+
     # --- Summary ---
 
     print()

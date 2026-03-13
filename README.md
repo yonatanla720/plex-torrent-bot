@@ -6,7 +6,7 @@ A Telegram bot that searches for torrents via Jackett and downloads them through
 
 - **Search** — Send any movie or TV show name to search across all your Jackett indexers
 - **Smart detection** — Automatically detects TV shows (S01E05 patterns) vs movies
-- **Browse results** — Paginated results with detail view (description, seeders, leechers, size, upload date)
+- **Browse results** — Paginated results with detail view, poster art from TMDB, and torrent metadata
 - **Auto mode** — Optionally auto-pick the best torrent based on quality/seeder ranking
 - **Download management** — Monitor progress, ETA, speed; cancel torrents; clear completed
 - **Completion notifications** — Get notified when downloads finish
@@ -57,6 +57,7 @@ None — the setup script installs everything for you (Python will be installed 
 | `jackett` | `url`, `api_key` | Jackett connection |
 | `qbittorrent` | `host`, `port`, `username`, `password` | qBittorrent Web UI connection |
 | `paths` | `movies`, `tv` | Download directories (should match Plex library paths) |
+| `tmdb` | `api_key` | TMDB API key for poster art (optional, [get one free](https://www.themoviedb.org/settings/api)) |
 | `proxy` | `url` | SOCKS5 proxy for Telegram API (optional) |
 | `preferences` | `settings_password` | Password to protect bot settings (optional) |
 
@@ -118,6 +119,18 @@ The bot uses a PID lock file (`bot.pid`). If it wasn't shut down cleanly, the st
 rm bot.pid
 ```
 
+**No poster art on torrent details**
+
+Poster art requires a free TMDB API key. To set it up:
+1. Create an account at [themoviedb.org](https://www.themoviedb.org/signup)
+2. Go to [Settings > API](https://www.themoviedb.org/settings/api) and request an API key (choose "Developer" and fill in basic details — approval is instant)
+3. Copy the **API Key** (not the "Read Access Token") and add it to `config.yaml`:
+   ```yaml
+   tmdb:
+     api_key: "your_api_key_here"
+   ```
+Results with available poster art are marked with a 🎬 icon in the search results list. Without a TMDB key, the bot works normally but shows text-only detail views.
+
 **Port conflicts when creating Docker containers**
 
 If ports 9117 (Jackett), 8080 (qBittorrent), or 8191 (FlareSolverr) are already in use, stop the conflicting service or change the port mapping. For example, to use port 9118 for Jackett, recreate the container with `-p 9118:9117` and update `jackett.url` in `config.yaml`.
@@ -127,6 +140,7 @@ If ports 9117 (Jackett), 8080 (qBittorrent), or 8191 (FlareSolverr) are already 
 ```
 Telegram → bot.py → jackett.py → Jackett API (Torznab XML)
                   → qbittorrent.py → qBittorrent Web API
+                  → tmdb.py → TMDB API (poster art)
                   → media.py (detection, ranking, filtering)
                   → config.py (YAML config + runtime settings)
 ```

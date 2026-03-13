@@ -20,6 +20,7 @@ class TorrentResult:
     description: str = ""
     leechers: int = 0
     info_url: str = ""
+    imdb_id: str = ""
 
     @property
     def size_display(self) -> str:

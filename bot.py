@@ -16,6 +16,7 @@ from telegram.ext import (
 )
 
 import jackett
+import tmdb
 from config import load_config, load_settings, save_settings
 from media import TorrentResult, detect_media_type, extract_tv_path, rank_and_filter
 from qbittorrent import QBitClient
@@ -37,6 +38,7 @@ qb = QBitClient(
 )
 
 ALLOWED_USERS: set[int] = set(cfg["telegram"]["allowed_users"])
+TMDB_API_KEY: str = (cfg.get("tmdb") or {}).get("api_key", "")
 
 
 # --- Auth decorator ---
@@ -398,7 +400,8 @@ async def _show_page(msg, results, query, media_type, page, page_size):
     buttons = []
     for i, r in enumerate(page_results):
         idx = start + i
-        label = f"{r.title[:50]}... | {r.size_display} | {r.seeders}S" if len(r.title) > 50 else f"{r.title} | {r.size_display} | {r.seeders}S"
+        poster_icon = "🎬 " if r.imdb_id else ""
+        label = f"{poster_icon}{r.title[:50]}... | {r.size_display} | {r.seeders}S" if len(r.title) > 50 else f"{poster_icon}{r.title} | {r.size_display} | {r.seeders}S"
         buttons.append([InlineKeyboardButton(label, callback_data=f"pick:{idx}")])
 
     nav = []
@@ -435,6 +438,17 @@ async def callback_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Session expired. Send your search again.")
         return
 
+    # If returning from a photo detail view, delete the photo and send a new text message
+    photo_msg_id = context.user_data.pop("detail_photo_msg_id", None)
+    if photo_msg_id:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        msg = await query.message.chat.send_message("Loading...")
+        await _show_page(msg, results, pending_query, media_type, page, page_size)
+        return
+
     await _show_page(query.message, results, pending_query, media_type, page, page_size)
 
 
@@ -469,10 +483,6 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     back_page = idx // page_size
 
     desc = r.description.strip() if r.description else ""
-    # Telegram messages have a 4096 char limit; truncate description if needed
-    max_desc_len = 3000
-    if len(desc) > max_desc_len:
-        desc = desc[:max_desc_len] + "..."
 
     detail = (
         f"Title: {r.title}\n"
@@ -483,13 +493,53 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if desc:
         detail += f"\n\nDescription:\n{desc}"
+
     buttons = [
         [InlineKeyboardButton("Download", callback_data=f"dl:{idx}")],
     ]
     if r.info_url and r.info_url.startswith("http"):
         buttons.append([InlineKeyboardButton("View on indexer", url=r.info_url)])
     buttons.append([InlineKeyboardButton("< Back to results", callback_data=f"page:{back_page}")])
-    await query.edit_message_text(detail, reply_markup=InlineKeyboardMarkup(buttons))
+    markup = InlineKeyboardMarkup(buttons)
+
+    # Try to send with poster art
+    poster_url = await tmdb.get_poster_url(TMDB_API_KEY, r.imdb_id)
+    if poster_url:
+        # Photo captions have a 1024 char limit
+        if len(detail) > 1024:
+            detail = detail[:1021] + "..."
+        try:
+            await query.message.delete()
+            sent = await query.message.chat.send_photo(
+                photo=poster_url,
+                caption=detail,
+                reply_markup=markup,
+            )
+            # Track the photo message so "Back to results" can delete it
+            context.user_data["detail_photo_msg_id"] = sent.message_id
+            return
+        except Exception:
+            pass  # Fall through to text-only
+
+    # Text-only fallback
+    # Restore text limit for non-photo messages
+    if len(detail) > 4096:
+        detail = detail[:4093] + "..."
+    context.user_data.pop("detail_photo_msg_id", None)
+    await query.edit_message_text(detail, reply_markup=markup)
+
+
+async def _reply_or_edit(query, context, text, reply_markup=None):
+    """Send text reply, handling the case where the current message is a photo."""
+    photo_msg_id = context.user_data.pop("detail_photo_msg_id", None)
+    if photo_msg_id:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.message.chat.send_message(text, reply_markup=reply_markup)
+    else:
+        await query.edit_message_text(text, reply_markup=reply_markup)
 
 
 async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -499,7 +549,7 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     if user_id not in ALLOWED_USERS:
-        await query.edit_message_text("Unauthorized.")
+        await _reply_or_edit(query, context, "Unauthorized.")
         return
 
     idx = int(query.data.split(":")[1])
@@ -507,7 +557,7 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_type = context.user_data.get("pending_media_type", "movie")
 
     if idx >= len(results):
-        await query.edit_message_text("Selection expired. Search again.")
+        await _reply_or_edit(query, context, "Selection expired. Search again.")
         return
 
     chosen = results[idx]
@@ -526,7 +576,8 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Change path", callback_data="tvpath:change")],
             [InlineKeyboardButton("< Back", callback_data=f"pick:{idx}")],
         ]
-        await query.edit_message_text(
+        await _reply_or_edit(
+            query, context,
             f"Title: {chosen.title}\n\n"
             f"Download path:\n{full_path}\n\n"
             f"Is this correct?",
@@ -538,14 +589,15 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await _add_torrent(chosen.magnet, media_type, "")
     except Exception as e:
-        await query.edit_message_text(f"Failed to add torrent: {e}")
+        await _reply_or_edit(query, context, f"Failed to add torrent: {e}")
         return
 
     save_path = cfg["paths"]["movies"]
-    await query.edit_message_text(
+    await _reply_or_edit(
+        query, context,
         f"Adding: {chosen.title}\n"
         f"({chosen.size_display}, {chosen.seeders} seeders)\n\n"
-        f"Download started! Category: {media_type} -> {save_path}"
+        f"Download started! Category: {media_type} -> {save_path}",
     )
     context.user_data.pop("pending_results", None)
     context.user_data.pop("pending_media_type", None)

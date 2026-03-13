@@ -16,6 +16,9 @@ paths:
   movies: "/mnt/media/Movies"
   tv: "/mnt/media/TV Shows"
 
+tmdb:
+  api_key: ""  # Optional: TMDB API key for poster art (free at themoviedb.org)
+
 proxy:
   # url: "socks5://127.0.0.1:1080"  # Uncomment if Telegram is blocked
 
