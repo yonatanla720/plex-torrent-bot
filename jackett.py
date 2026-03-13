@@ -49,7 +49,7 @@ def _parse_torznab(xml_text: str) -> list[TorrentResult]:
             continue
 
         seeders = _get_torznab_attr(item, "seeders")
-        size = _get_torznab_attr(item, "size")
+        size = _get_torznab_attr(item, "size") or item.findtext("size", "0")
         indexer = item.findtext("jackettindexer", "")
 
         results.append(TorrentResult(
