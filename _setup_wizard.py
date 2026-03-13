@@ -735,73 +735,82 @@ def main():
         info("Creating Docker network 'media'...")
         run("docker network create media")
 
+    def _container_status(name):
+        """Check if a Docker container exists and is running.
+        Returns ('running', 'stopped', or 'missing').
+        """
+        result = run(f"docker inspect --format={{{{.State.Running}}}} {name}",
+                     check=False, capture=True)
+        if result is None:
+            return "missing"
+        return "running" if result.strip() == "true" else "stopped"
+
+    def _ensure_container(name, create_cmd, post_msg="", post_warn=""):
+        """Ensure a Docker container exists and is running."""
+        status = _container_status(name)
+        if status == "running":
+            info(f"{name} container is running")
+        elif status == "stopped":
+            info(f"Starting existing {name} container...")
+            run(f"docker start {name}")
+        else:
+            info(f"Creating {name} container...")
+            run(create_cmd, check=False)
+            # Check if it actually started
+            if _container_status(name) != "missing":
+                if post_msg:
+                    info(post_msg)
+                if post_warn:
+                    warn(post_warn)
+            else:
+                err(f"Failed to create {name} container")
+        run(f"docker network connect media {name}", check=False, capture=True)
+
     # --- Docker: Jackett ---
 
     print()
-    containers = run("docker ps -a --format '{{.Names}}'", capture=True) or ""
-    running = run("docker ps --format '{{.Names}}'", capture=True) or ""
-
-    if "jackett" in containers.splitlines():
-        if "jackett" in running.splitlines():
-            info("Jackett container is running")
-        else:
-            info("Starting existing Jackett container...")
-            run("docker start jackett")
-    else:
-        info("Creating Jackett container...")
-        config_dir = Path.home() / ".config" / "jackett"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        run(
-            f'docker run -d --name jackett --network media '
-            f'-p 9117:9117 -v "{config_dir}:/config" '
-            f'--restart unless-stopped lscr.io/linuxserver/jackett:latest'
-        )
-        info("Jackett started on port 9117")
-    run("docker network connect media jackett", check=False, capture=True)
+    config_dir = Path.home() / ".config" / "jackett"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_container(
+        "jackett",
+        f'docker run -d --name jackett --network media '
+        f'-p 9117:9117 -v "{config_dir}:/config" '
+        f'--restart unless-stopped lscr.io/linuxserver/jackett:latest',
+        post_msg="Jackett started on port 9117",
+    )
 
     # --- Docker: qBittorrent ---
 
     print()
-    if "qbittorrent" in containers.splitlines():
-        if "qbittorrent" in running.splitlines():
-            info("qBittorrent container is running")
-        else:
-            info("Starting existing qBittorrent container...")
-            run("docker start qbittorrent")
-    else:
-        info("Creating qBittorrent container...")
-        config_dir = Path.home() / ".config" / "qbittorrent"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        vol = f'-v "{config_dir}:/config"'
-        if media_root:
-            vol += f' -v "{media_root}:{media_root}"'
-        run(
-            f'docker run -d --name qbittorrent --network media '
-            f'-p 8080:8080 -p 6881:6881 {vol} '
-            f'--restart unless-stopped lscr.io/linuxserver/qbittorrent:latest'
-        )
-        info("qBittorrent started on port 8080")
-        warn("Default login: admin / adminadmin (check container logs for temp password)")
-    run("docker network connect media qbittorrent", check=False, capture=True)
+    config_dir = Path.home() / ".config" / "qbittorrent"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    vol = f'-v "{config_dir}:/config"'
+    if media_root:
+        vol += f' -v "{media_root}:{media_root}"'
+    _ensure_container(
+        "qbittorrent",
+        f'docker run -d --name qbittorrent --network media '
+        f'-p 8080:8080 -p 6881:6881 {vol} '
+        f'--restart unless-stopped lscr.io/linuxserver/qbittorrent:latest',
+        post_msg="qBittorrent started on port 8080",
+        post_warn="Default login: admin / adminadmin (check container logs for temp password)",
+    )
 
     # --- Docker: FlareSolverr (optional) ---
 
     print()
-    if "flaresolverr" in containers.splitlines():
-        if "flaresolverr" in running.splitlines():
-            info("FlareSolverr container is running")
-        else:
-            info("Starting existing FlareSolverr container...")
-            run("docker start flaresolverr")
+    status = _container_status("flaresolverr")
+    if status != "missing":
+        _ensure_container("flaresolverr", "")
     elif ask_yes_no("Install FlareSolverr? (bypasses Cloudflare for some indexers)"):
-        run(
+        _ensure_container(
+            "flaresolverr",
             'docker run -d --name flaresolverr --network media '
             '-p 8191:8191 --restart unless-stopped '
-            'ghcr.io/flaresolverr/flaresolverr:latest'
+            'ghcr.io/flaresolverr/flaresolverr:latest',
+            post_msg="FlareSolverr started on port 8191",
+            post_warn="Set FlareSolverr URL in Jackett to: http://flaresolverr:8191",
         )
-        info("FlareSolverr started on port 8191")
-        warn("Set FlareSolverr URL in Jackett to: http://flaresolverr:8191")
-    run("docker network connect media flaresolverr", check=False, capture=True)
 
     # =========================================
     #   Step 3: Jackett configuration
