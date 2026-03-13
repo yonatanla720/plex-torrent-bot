@@ -16,6 +16,7 @@ from telegram.ext import (
 )
 
 import jackett
+import plex as plex_api
 import tmdb
 from config import load_config, load_settings, save_settings
 from media import TorrentResult, detect_media_type, extract_tv_path, rank_and_filter
@@ -39,6 +40,8 @@ qb = QBitClient(
 
 ALLOWED_USERS: set[int] = set(cfg["telegram"]["allowed_users"])
 TMDB_API_KEY: str = (cfg.get("tmdb") or {}).get("api_key", "")
+PLEX_URL: str = (cfg.get("plex") or {}).get("url", "").rstrip("/")
+PLEX_TOKEN: str = (cfg.get("plex") or {}).get("token", "")
 
 
 # --- Auth decorator ---
@@ -141,6 +144,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/top - Browse top torrents by category\n"
         "/status - Show active downloads\n"
         "/recent - Recent searches\n"
+        "/plex - Manage Plex libraries\n"
         "/settings - View/change settings\n"
         "/clear - Cancel current search\n"
         "/deleteall - Delete all messages"
@@ -1021,6 +1025,268 @@ async def callback_quality_toggle(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+# --- Plex library management ---
+
+PLEX_PAGE_SIZE = 10
+
+
+def _plex_available() -> bool:
+    return bool(PLEX_URL and PLEX_TOKEN)
+
+
+@authorized
+async def cmd_plex(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _plex_available():
+        await update.message.reply_text("Plex is not configured. Set plex.url and plex.token in config.yaml.")
+        return
+
+    try:
+        sections = await plex_api.get_sections(PLEX_URL, PLEX_TOKEN)
+    except Exception as e:
+        await update.message.reply_text(f"Failed to connect to Plex: {e}")
+        return
+
+    buttons = []
+    for s in sections:
+        icon = "🎬" if s["type"] == "movie" else "📺"
+        buttons.append([InlineKeyboardButton(
+            f"{icon} {s['title']}", callback_data=f"plex:section:{s['key']}",
+        )])
+    buttons.append([InlineKeyboardButton("Close", callback_data="plex:close")])
+    await update.message.reply_text("Plex Libraries:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def _plex_edit_or_send(query, context, text, reply_markup=None):
+    """Edit message or delete photo and send new text message for Plex views."""
+    if context.user_data.pop("plex_photo_msg", False):
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.message.chat.send_message(text, reply_markup=reply_markup)
+    else:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+
+
+async def _plex_send_photo(query, context, photo_bytes, caption, reply_markup):
+    """Delete current message and send a photo message for Plex detail view."""
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    try:
+        await query.message.chat.send_photo(
+            photo=photo_bytes, caption=caption, reply_markup=reply_markup,
+        )
+        context.user_data["plex_photo_msg"] = True
+    except Exception:
+        # Fall back to text-only
+        await query.message.chat.send_message(caption, reply_markup=reply_markup)
+        context.user_data["plex_photo_msg"] = False
+
+
+def _plex_libraries_buttons(sections):
+    buttons = []
+    for s in sections:
+        icon = "🎬" if s["type"] == "movie" else "📺"
+        buttons.append([InlineKeyboardButton(
+            f"{icon} {s['title']}", callback_data=f"plex:section:{s['key']}",
+        )])
+    buttons.append([InlineKeyboardButton("Close", callback_data="plex:close")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def callback_plex(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in ALLOWED_USERS:
+        await _plex_edit_or_send(query, context, "Unauthorized.")
+        return
+
+    data = query.data  # plex:action:arg1:arg2...
+    parts = data.split(":")
+    action = parts[1]
+
+    if action == "close":
+        await query.message.delete()
+        return
+
+    if action == "section":
+        section_key = parts[2]
+        page = int(parts[3]) if len(parts) > 3 else 0
+        await _plex_show_section(query, context, section_key, page)
+
+    elif action == "detail":
+        # Detail view with artwork
+        rating_key = parts[2]
+        section_key = parts[3]
+        page = parts[4] if len(parts) > 4 else "0"
+        await _plex_show_detail(query, context, rating_key, section_key, page)
+
+    elif action == "show":
+        rating_key = parts[2]
+        await _plex_show_children(query, context, rating_key, "show")
+
+    elif action == "season":
+        rating_key = parts[2]
+        show_key = parts[3] if len(parts) > 3 else ""
+        await _plex_show_children(query, context, rating_key, "season", parent_key=show_key)
+
+    elif action == "confirm":
+        rating_key = parts[2]
+        title = ":".join(parts[3:])
+        buttons = [
+            [InlineKeyboardButton("Yes, delete", callback_data=f"plex:delete:{rating_key}")],
+            [InlineKeyboardButton("Cancel", callback_data="plex:back")],
+        ]
+        await _plex_edit_or_send(
+            query, context,
+            f"Delete \"{title}\" from Plex?\n\nThis will remove the media files from disk.",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    elif action == "delete":
+        rating_key = parts[2]
+        try:
+            ok = await plex_api.delete_item(PLEX_URL, PLEX_TOKEN, rating_key)
+            if ok:
+                await _plex_edit_or_send(query, context, "Deleted successfully.")
+            else:
+                await _plex_edit_or_send(
+                    query, context,
+                    "Failed to delete. Make sure 'Allow media deletion' is enabled in Plex settings.",
+                )
+        except Exception as e:
+            await _plex_edit_or_send(query, context, f"Delete failed: {e}")
+
+    elif action == "back":
+        try:
+            sections = await plex_api.get_sections(PLEX_URL, PLEX_TOKEN)
+        except Exception:
+            await _plex_edit_or_send(query, context, "Failed to load Plex libraries.")
+            return
+        await _plex_edit_or_send(
+            query, context, "Plex Libraries:", reply_markup=_plex_libraries_buttons(sections),
+        )
+
+
+async def _plex_show_detail(query, context, rating_key: str, section_key: str, page: str):
+    """Show detail view with artwork for a movie or show."""
+    await _plex_edit_or_send(query, context, "Loading...")
+    try:
+        meta = await plex_api.get_metadata(PLEX_URL, PLEX_TOKEN, rating_key)
+    except Exception as e:
+        await _plex_edit_or_send(query, context, f"Failed to load details: {e}")
+        return
+
+    year = f" ({meta['year']})" if meta.get("year") else ""
+    title = f"{meta['title']}{year}"
+    lines = [title]
+    if meta.get("contentRating"):
+        lines.append(f"Rated: {meta['contentRating']}")
+    if meta.get("rating"):
+        lines.append(f"Rating: {meta['rating']}")
+    if meta.get("duration"):
+        mins = int(meta["duration"]) // 60000
+        lines.append(f"Duration: {mins} min")
+    if meta.get("summary"):
+        summary = meta["summary"]
+        # Photo captions max 1024 chars
+        max_summary = 800 - len("\n".join(lines))
+        if len(summary) > max_summary:
+            summary = summary[:max_summary] + "..."
+        lines.append(f"\n{summary}")
+    caption = "\n".join(lines)
+
+    buttons = []
+    if meta.get("type") == "show":
+        buttons.append([InlineKeyboardButton("Browse seasons", callback_data=f"plex:show:{rating_key}")])
+    buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"plex:confirm:{rating_key}:{title}"[:64])])
+    buttons.append([InlineKeyboardButton("< Back to list", callback_data=f"plex:section:{section_key}:{page}")])
+    markup = InlineKeyboardMarkup(buttons)
+
+    thumb_bytes = await plex_api.get_thumb(PLEX_URL, PLEX_TOKEN, meta.get("thumb", ""))
+    if thumb_bytes:
+        await _plex_send_photo(query, context, thumb_bytes, caption, markup)
+    else:
+        await _plex_edit_or_send(query, context, caption, reply_markup=markup)
+
+
+async def _plex_show_section(query, context, section_key: str, page: int):
+    """Show paginated items in a Plex library section."""
+    start = page * PLEX_PAGE_SIZE
+    try:
+        items, total = await plex_api.get_items(
+            PLEX_URL, PLEX_TOKEN, section_key, start=start, size=PLEX_PAGE_SIZE,
+        )
+    except Exception as e:
+        await _plex_edit_or_send(query, context, f"Failed to load library: {e}")
+        return
+
+    total_pages = (total + PLEX_PAGE_SIZE - 1) // PLEX_PAGE_SIZE
+    buttons = []
+    for item in items:
+        year = f" ({item['year']})" if item.get("year") else ""
+        title = f"{item['title']}{year}"
+        cb = f"plex:detail:{item['ratingKey']}:{section_key}:{page}"
+        buttons.append([InlineKeyboardButton(title, callback_data=cb[:64])])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("< Prev", callback_data=f"plex:section:{section_key}:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("Next >", callback_data=f"plex:section:{section_key}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("< Libraries", callback_data="plex:back")])
+
+    await _plex_edit_or_send(
+        query, context,
+        f"Page {page + 1}/{total_pages} ({total} items):",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def _plex_show_children(query, context, rating_key: str, parent_type: str, parent_key: str = ""):
+    """Show seasons of a show or episodes of a season."""
+    try:
+        children = await plex_api.get_children(PLEX_URL, PLEX_TOKEN, rating_key)
+    except Exception as e:
+        await _plex_edit_or_send(query, context, f"Failed to load: {e}")
+        return
+
+    buttons = []
+    if parent_type == "show":
+        buttons.append([InlineKeyboardButton(
+            "🗑 Delete entire series", callback_data=f"plex:confirm:{rating_key}:Series",
+        )])
+    elif parent_type == "season":
+        buttons.append([InlineKeyboardButton(
+            "🗑 Delete this season", callback_data=f"plex:confirm:{rating_key}:Season",
+        )])
+
+    for child in children:
+        if child["type"] == "season":
+            title = child["title"]
+            cb = f"plex:season:{child['ratingKey']}:{rating_key}"
+            buttons.append([InlineKeyboardButton(title, callback_data=cb[:64])])
+        elif child["type"] == "episode":
+            ep_num = child.get("index", "?")
+            title = f"E{ep_num} - {child['title']}"
+            cb = f"plex:confirm:{child['ratingKey']}:{title}"
+            buttons.append([InlineKeyboardButton(title, callback_data=cb[:64])])
+
+    if parent_type == "season" and parent_key:
+        buttons.append([InlineKeyboardButton("< Back to show", callback_data=f"plex:show:{parent_key}")])
+    else:
+        buttons.append([InlineKeyboardButton("< Libraries", callback_data="plex:back")])
+
+    label = "Seasons:" if parent_type == "show" else "Episodes:"
+    await _plex_edit_or_send(query, context, label, reply_markup=InlineKeyboardMarkup(buttons))
+
+
 # --- Download completion notifications ---
 
 _known_torrents: dict[str, bool] = {}  # hash -> was_complete
@@ -1061,6 +1327,7 @@ async def post_init(application):
         BotCommand("top", "Browse top torrents"),
         BotCommand("clear", "Cancel current search"),
         BotCommand("deleteall", "Delete all messages"),
+        BotCommand("plex", "Manage Plex libraries"),
         BotCommand("settings", "View/change settings"),
     ])
 
@@ -1132,8 +1399,10 @@ def main():
     app.add_handler(CommandHandler("recent", cmd_recent))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("done", cmd_done))
+    app.add_handler(CommandHandler("plex", cmd_plex))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CallbackQueryHandler(callback_top, pattern=r"^top:"))
+    app.add_handler(CallbackQueryHandler(callback_plex, pattern=r"^plex:"))
     app.add_handler(CallbackQueryHandler(callback_recent, pattern=r"^recent:"))
     app.add_handler(CallbackQueryHandler(callback_type, pattern=r"^type:"))
     app.add_handler(CallbackQueryHandler(callback_page, pattern=r"^page:"))
