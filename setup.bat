@@ -4,26 +4,27 @@ cd /d "%~dp0"
 
 REM --- Find Python 3.10+ ---
 
+set PYTHON_CMD=
+
 where python >nul 2>&1
 if %errorlevel% equ 0 (
     python -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" 2>nul
+    if %errorlevel% equ 0 set PYTHON_CMD=python
+)
+
+if not defined PYTHON_CMD (
+    where python3 >nul 2>&1
     if %errorlevel% equ 0 (
-        echo [OK] Python found
-        python _setup_wizard.py
-        pause
-        exit /b 0
+        python3 -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" 2>nul
+        if %errorlevel% equ 0 set PYTHON_CMD=python3
     )
 )
 
-where python3 >nul 2>&1
-if %errorlevel% equ 0 (
-    python3 -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" 2>nul
-    if %errorlevel% equ 0 (
-        echo [OK] Python found
-        python3 _setup_wizard.py
-        pause
-        exit /b 0
-    )
+if defined PYTHON_CMD (
+    echo [OK] Python found
+    %PYTHON_CMD% _setup_wizard.py
+    pause
+    exit /b 0
 )
 
 REM --- Python not found, try to install ---
