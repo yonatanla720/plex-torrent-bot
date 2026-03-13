@@ -55,3 +55,12 @@ class QBitClient:
                 "category": t.category,
             })
         return active
+
+    def clear_completed(self) -> int:
+        """Remove completed torrents from qBittorrent. Returns count removed."""
+        torrents = self.client.torrents_info(status_filter="completed")
+        if not torrents:
+            return 0
+        hashes = [t.hash for t in torrents]
+        self.client.torrents_delete(delete_files=False, torrent_hashes=hashes)
+        return len(hashes)
