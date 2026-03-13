@@ -27,10 +27,13 @@ class QBitClient:
             else:
                 self.client.torrents_create_category(name=cat, save_path=save_path)
 
-    def add_torrent(self, url: str, media_type: str) -> None:
+    def add_torrent(self, url: str, media_type: str, subfolder: str = "") -> None:
         """Add a torrent (magnet or URL) with the appropriate category."""
+        import os
         category = "tv" if media_type == "tv" else "movies"
         save_path = self.paths.get(media_type, self.paths["movies"])
+        if subfolder:
+            save_path = os.path.join(save_path, subfolder)
         self.client.torrents_add(urls=url, category=category, save_path=save_path)
 
     def get_active_torrents(self) -> list[dict]:

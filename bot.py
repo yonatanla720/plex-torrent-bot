@@ -14,7 +14,7 @@ from telegram.ext import (
 
 import jackett
 from config import load_config
-from media import TorrentResult, detect_media_type, rank_and_filter
+from media import TorrentResult, detect_media_type, extract_tv_path, rank_and_filter
 from qbittorrent import QBitClient
 
 logging.basicConfig(
@@ -78,8 +78,8 @@ async def _search_and_filter(query: str, media_type: str) -> list[TorrentResult]
     )
 
 
-async def _add_torrent(magnet: str, media_type: str) -> None:
-    await asyncio.to_thread(qb.add_torrent, magnet, media_type)
+async def _add_torrent(magnet: str, media_type: str, series_name: str = "") -> None:
+    await asyncio.to_thread(qb.add_torrent, magnet, media_type, series_name)
 
 
 async def _plex_scan() -> bool:
@@ -174,12 +174,15 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("No results found with enough seeders.")
         return
     best = results[0]
+    tv_sub = extract_tv_path(best.title) if media_type == "tv" else ""
     try:
-        await _add_torrent(best.magnet, media_type)
+        await _add_torrent(best.magnet, media_type, tv_sub)
     except Exception as e:
         await msg.edit_text(f"Failed to add torrent: {e}")
         return
     save_path = cfg["paths"]["tv"] if media_type == "tv" else cfg["paths"]["movies"]
+    if tv_sub:
+        save_path = f"{save_path}/{tv_sub}"
     await msg.edit_text(
         f"Adding: {best.title}\n"
         f"({best.size_display}, {best.seeders} seeders)\n\n"
@@ -254,13 +257,16 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
     mode = cfg["preferences"]["default_mode"]
     if mode == "auto":
         best = results[0]
+        series = extract_series_name(best.title) if media_type == "tv" else ""
         try:
-            await _add_torrent(best.magnet, media_type)
+            await _add_torrent(best.magnet, media_type, series)
         except Exception as e:
             await msg.edit_text(f"Failed to add torrent: {e}")
             return
 
         save_path = cfg["paths"]["tv"] if media_type == "tv" else cfg["paths"]["movies"]
+        if series:
+            save_path = f"{save_path}/{series}"
         await msg.edit_text(
             f"Adding: {best.title}\n"
             f"({best.size_display}, {best.seeders} seeders)\n\n"
@@ -358,7 +364,8 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Title: {r.title}\n"
         f"Size: {r.size_display}\n"
         f"Seeders: {r.seeders}\n"
-        f"Indexer: {r.indexer or 'unknown'}"
+        f"Indexer: {r.indexer or 'unknown'}\n"
+        f"Uploaded: {r.pub_date or 'unknown'}"
     )
     buttons = [
         [InlineKeyboardButton("Download", callback_data=f"dl:{idx}")],
@@ -386,13 +393,16 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chosen = results[idx]
+    tv_sub = extract_tv_path(chosen.title) if media_type == "tv" else ""
     try:
-        await _add_torrent(chosen.magnet, media_type)
+        await _add_torrent(chosen.magnet, media_type, tv_sub)
     except Exception as e:
         await query.edit_message_text(f"Failed to add torrent: {e}")
         return
 
     save_path = cfg["paths"]["tv"] if media_type == "tv" else cfg["paths"]["movies"]
+    if tv_sub:
+        save_path = f"{save_path}/{tv_sub}"
     await query.edit_message_text(
         f"Adding: {chosen.title}\n"
         f"({chosen.size_display}, {chosen.seeders} seeders)\n\n"
