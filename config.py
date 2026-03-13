@@ -44,13 +44,24 @@ SETTINGS_PATH = Path("settings.yaml")
 
 # Keys that can be changed at runtime via the bot
 SETTINGS_DEFAULTS = {
+    "quality": ["1080p", "720p", "2160p"],
+    "min_seeders": 3,
     "max_size_gb": 0,
+    "max_results": 5,
+    "default_mode": "choose",
 }
 
 
-def load_settings() -> dict:
-    """Load runtime-editable settings from settings.yaml, with defaults."""
+def load_settings(cfg: dict) -> dict:
+    """Load runtime-editable settings from settings.yaml, falling back to
+    config.yaml preferences, then SETTINGS_DEFAULTS."""
     settings = dict(SETTINGS_DEFAULTS)
+    # Seed from config.yaml preferences (initial values)
+    prefs = cfg.get("preferences") or {}
+    for key in SETTINGS_DEFAULTS:
+        if key in prefs:
+            settings[key] = prefs[key]
+    # Override with settings.yaml (bot-modified values)
     if SETTINGS_PATH.exists():
         with open(SETTINGS_PATH) as f:
             data = yaml.safe_load(f)

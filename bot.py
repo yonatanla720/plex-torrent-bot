@@ -24,7 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 cfg = load_config()
-runtime_settings = load_settings()
+runtime_settings = load_settings(cfg)
 qb = QBitClient(
     host=cfg["qbittorrent"]["host"],
     port=cfg["qbittorrent"]["port"],
@@ -71,11 +71,10 @@ async def _search_and_filter(query: str, media_type: str) -> list[TorrentResult]
         query=query,
         media_type=media_type,
     )
-    prefs = cfg["preferences"]
     return rank_and_filter(
         results,
-        quality_prefs=prefs["quality"],
-        min_seeders=prefs["min_seeders"],
+        quality_prefs=runtime_settings["quality"],
+        min_seeders=runtime_settings["min_seeders"],
         max_size_gb=runtime_settings.get("max_size_gb", 0),
     )
 
@@ -133,7 +132,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
+    for key in [
+        "pending_results", "pending_media_type", "pending_query",
+        "pending_tv_download", "awaiting_tv_path",
+        "awaiting_settings_password", "awaiting_settings_value",
+    ]:
+        context.user_data.pop(key, None)
     await update.message.reply_text("Cleared. Send a new search anytime.")
 
 
@@ -219,18 +223,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Wrong password.")
             return
         context.user_data["awaiting_settings_value"] = setting
-        if setting == "maxsize":
-            current = runtime_settings.get("max_size_gb", 0)
-            await update.message.reply_text(
-                f"Current max size: {current} GB (0 = no limit)\n\n"
-                "Enter new max size in GB:"
-            )
+        current_values = {
+            "seeders": runtime_settings["min_seeders"],
+            "maxsize": runtime_settings.get("max_size_gb", 0),
+            "maxresults": runtime_settings["max_results"],
+        }
+        prompt = SETTINGS_PROMPTS[setting].format(current_values[setting])
+        await update.message.reply_text(prompt)
         return
 
     # Check if we're waiting for a settings value
     if context.user_data.get("awaiting_settings_value"):
         setting = context.user_data.pop("awaiting_settings_value")
-        if setting == "maxsize":
+        if setting == "seeders":
+            try:
+                value = int(query)
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text("Invalid value. Enter a positive number.")
+                return
+            runtime_settings["min_seeders"] = value
+            save_settings(runtime_settings)
+        elif setting == "maxsize":
             try:
                 value = float(query)
                 if value < 0:
@@ -240,8 +255,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             runtime_settings["max_size_gb"] = value
             save_settings(runtime_settings)
-            display = f"{value} GB" if value > 0 else "No limit"
-            await update.message.reply_text(f"Max torrent size set to: {display}")
+        elif setting == "maxresults":
+            try:
+                value = int(query)
+                if value < 1:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text("Invalid value. Enter a positive number.")
+                return
+            runtime_settings["max_results"] = value
+            save_settings(runtime_settings)
+        await update.message.reply_text(_settings_text(), reply_markup=_settings_buttons())
         return
 
     # Check if we're waiting for a custom TV path
@@ -335,7 +359,7 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
         await msg.edit_text("No results found with enough seeders.")
         return
 
-    mode = cfg["preferences"]["default_mode"]
+    mode = runtime_settings["default_mode"]
     if mode == "auto":
         best = results[0]
         series = extract_series_name(best.title) if media_type == "tv" else ""
@@ -357,7 +381,7 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
         context.user_data["pending_results"] = results
         context.user_data["pending_media_type"] = media_type
         context.user_data["pending_query"] = query
-        page_size = cfg["preferences"]["max_results"]
+        page_size = runtime_settings["max_results"]
         await _show_page(msg, results, query, media_type, page=0, page_size=page_size)
 
 
@@ -690,24 +714,55 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Settings ---
 
+def _settings_text() -> str:
+    s = runtime_settings
+    max_size = s.get("max_size_gb", 0)
+    size_display = f"{max_size} GB" if max_size > 0 else "No limit"
+    return (
+        "Settings:\n\n"
+        f"Quality: {', '.join(s['quality'])}\n"
+        f"Min seeders: {s['min_seeders']}\n"
+        f"Max torrent size: {size_display}\n"
+        f"Results per page: {s['max_results']}\n"
+        f"Mode: {s['default_mode']}"
+    )
+
+
+def _settings_buttons() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Quality preferences", callback_data="settings:quality")],
+        [InlineKeyboardButton("Change min seeders", callback_data="settings:seeders")],
+        [InlineKeyboardButton("Change max size", callback_data="settings:maxsize")],
+        [InlineKeyboardButton("Change results per page", callback_data="settings:maxresults")],
+        [
+            InlineKeyboardButton("Mode: auto", callback_data="settings:mode_auto"),
+            InlineKeyboardButton("Mode: choose", callback_data="settings:mode_choose"),
+        ],
+    ])
+
+
+def _quality_buttons() -> InlineKeyboardMarkup:
+    active = set(runtime_settings["quality"])
+    rows = []
+    for q in QUALITY_OPTIONS:
+        check = "✅" if q in active else "⬜"
+        rows.append([InlineKeyboardButton(f"{check} {q}", callback_data=f"qtoggle:{q}")])
+    rows.append([InlineKeyboardButton("< Back to settings", callback_data="settings:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+QUALITY_OPTIONS = ["2160p", "1080p", "720p", "480p"]
+
+SETTINGS_PROMPTS = {
+    "seeders": "Current: {}\n\nEnter minimum seeders:",
+    "maxsize": "Current: {} GB (0 = no limit)\n\nEnter max size in GB:",
+    "maxresults": "Current: {}\n\nEnter results per page:",
+}
+
+
 @authorized
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prefs = cfg["preferences"]
-    max_size = runtime_settings.get("max_size_gb", 0)
-    size_display = f"{max_size} GB" if max_size > 0 else "No limit"
-
-    text = (
-        "Settings:\n\n"
-        f"Max torrent size: {size_display}\n"
-        f"Min seeders: {prefs['min_seeders']}\n"
-        f"Quality: {', '.join(prefs['quality'])}\n"
-        f"Results per page: {prefs['max_results']}\n"
-        f"Mode: {prefs['default_mode']}"
-    )
-    buttons = [
-        [InlineKeyboardButton("Change max size", callback_data="settings:maxsize")],
-    ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    await update.message.reply_text(_settings_text(), reply_markup=_settings_buttons())
 
 
 async def callback_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -720,18 +775,76 @@ async def callback_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     action = query.data.split(":")[1]
-    if action == "maxsize":
-        password = cfg["preferences"].get("settings_password", "")
-        if password:
-            context.user_data["awaiting_settings_password"] = "maxsize"
-            await query.edit_message_text("Enter settings password:")
-        else:
-            context.user_data["awaiting_settings_value"] = "maxsize"
-            current = runtime_settings.get("max_size_gb", 0)
-            await query.edit_message_text(
-                f"Current max size: {current} GB (0 = no limit)\n\n"
-                "Enter new max size in GB:"
-            )
+
+    # Back to main settings view
+    if action == "back":
+        await query.edit_message_text(_settings_text(), reply_markup=_settings_buttons())
+        return
+
+    # Mode toggles don't need text input
+    if action == "mode_auto":
+        runtime_settings["default_mode"] = "auto"
+        save_settings(runtime_settings)
+        await query.edit_message_text(_settings_text(), reply_markup=_settings_buttons())
+        return
+    if action == "mode_choose":
+        runtime_settings["default_mode"] = "choose"
+        save_settings(runtime_settings)
+        await query.edit_message_text(_settings_text(), reply_markup=_settings_buttons())
+        return
+
+    # Quality — show toggle sub-menu (no text input needed)
+    if action == "quality":
+        await query.edit_message_text(
+            f"Quality preferences (tap to toggle):\n\nActive: {', '.join(runtime_settings['quality'])}",
+            reply_markup=_quality_buttons(),
+        )
+        return
+
+    # Text input settings — check password first
+    current_values = {
+        "seeders": runtime_settings["min_seeders"],
+        "maxsize": runtime_settings.get("max_size_gb", 0),
+        "maxresults": runtime_settings["max_results"],
+    }
+
+    password = cfg["preferences"].get("settings_password", "")
+    if password:
+        context.user_data["awaiting_settings_password"] = action
+        await query.edit_message_text("Enter settings password:")
+    else:
+        context.user_data["awaiting_settings_value"] = action
+        prompt = SETTINGS_PROMPTS[action].format(current_values[action])
+        await query.edit_message_text(prompt)
+
+
+async def callback_quality_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in ALLOWED_USERS:
+        await query.edit_message_text("Unauthorized.")
+        return
+
+    quality = query.data.split(":")[1]
+    current = list(runtime_settings["quality"])
+
+    if quality in current:
+        if len(current) <= 1:
+            await query.answer("At least one quality must be selected.", show_alert=True)
+            return
+        current.remove(quality)
+    else:
+        current.append(quality)
+
+    runtime_settings["quality"] = current
+    save_settings(runtime_settings)
+
+    await query.edit_message_text(
+        f"Quality preferences (tap to toggle):\n\nActive: {', '.join(current)}",
+        reply_markup=_quality_buttons(),
+    )
 
 
 # --- Download completion notifications ---
@@ -815,6 +928,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_pick, pattern=r"^pick:"))
     app.add_handler(CallbackQueryHandler(callback_download, pattern=r"^dl:"))
     app.add_handler(CallbackQueryHandler(callback_tvpath, pattern=r"^tvpath:"))
+    app.add_handler(CallbackQueryHandler(callback_quality_toggle, pattern=r"^qtoggle:"))
     app.add_handler(CallbackQueryHandler(callback_settings, pattern=r"^settings:"))
     app.add_handler(CallbackQueryHandler(callback_status_refresh, pattern=r"^status:refresh$"))
     app.add_handler(CallbackQueryHandler(callback_cancel_torrent, pattern=r"^cancel:"))

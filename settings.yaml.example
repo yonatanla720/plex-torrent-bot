@@ -1,2 +1,9 @@
 # Runtime settings (editable via /settings in the bot)
+quality:
+  - 1080p
+  - 720p
+  - 2160p
+min_seeders: 3
 max_size_gb: 0    # 0 = no limit; e.g. 15 to skip anything over 15 GB
+max_results: 5
+default_mode: choose   # "auto" or "choose"
