@@ -554,12 +554,30 @@ def main():
 
     # Add venv's site-packages to current process so we can import yaml
     py = get_venv_python()
-    site_packages = subprocess.run(
-        [py, "-c", "import site; print(site.getsitepackages()[0])"],
+    sp_lines = subprocess.run(
+        [py, "-c",
+         "import site; print('\\n'.join(site.getsitepackages()))"],
+        capture_output=True, text=True,
+    ).stdout.strip().splitlines()
+    for sp in sp_lines:
+        if sp and sp not in sys.path:
+            sys.path.insert(0, sp)
+    # Also add the user site-packages (some Windows setups need this)
+    user_sp = subprocess.run(
+        [py, "-c", "import site; print(site.getusersitepackages())"],
         capture_output=True, text=True,
     ).stdout.strip()
-    if site_packages and site_packages not in sys.path:
-        sys.path.insert(0, site_packages)
+    if user_sp and user_sp not in sys.path and os.path.isdir(user_sp):
+        sys.path.insert(0, user_sp)
+    # Verify yaml is now importable
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        # Last resort: find site-packages directly in the venv
+        for sp_dir in venv_dir.rglob("site-packages"):
+            if sp_dir.is_dir() and str(sp_dir) not in sys.path:
+                sys.path.insert(0, str(sp_dir))
+                break
 
     # --- Config file ---
 
