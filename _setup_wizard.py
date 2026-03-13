@@ -4,6 +4,7 @@
 import getpass
 import os
 import platform
+import select
 import shutil
 import subprocess
 import sys
@@ -158,10 +159,105 @@ def _show_install_help(tool):
 BLUE = "\033[0;34m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
+REVERSE = "\033[7m"
+
+
+def _read_key():
+    """Read a single keypress. Returns a string identifier."""
+    if sys.platform == "win32":
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            ch2 = msvcrt.getwch()
+            return {
+                "H": "up", "P": "down", "K": "left", "M": "right",
+                "I": "pageup", "Q": "pagedown", "G": "home", "O": "end",
+            }.get(ch2, "")
+        if ch == "\r":
+            return "enter"
+        if ch == "\x08":
+            return "backspace"
+        if ch == "\x1b":
+            return "escape"
+        return ch
+    else:
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            if ch == "\x1b":
+                if select.select([sys.stdin], [], [], 0.05)[0]:
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == "[":
+                        ch3 = sys.stdin.read(1)
+                        if ch3 in ("5", "6"):
+                            sys.stdin.read(1)  # consume trailing '~'
+                            return {"5": "pageup", "6": "pagedown"}[ch3]
+                        return {
+                            "A": "up", "B": "down", "C": "right", "D": "left",
+                            "H": "home", "F": "end",
+                        }.get(ch3, "")
+                return "escape"
+            if ch in ("\r", "\n"):
+                return "enter"
+            if ch in ("\x7f", "\x08"):
+                return "backspace"
+            return ch
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _render_browser(prompt_label, current, entries, cursor_idx, scroll_offset,
+                    page_size, prev_lines):
+    """Render the directory browser UI in-place. Returns number of lines drawn."""
+    lines = []
+    lines.append(f"  {BOLD}{prompt_label}{NC}")
+    lines.append(f"  {DIM}Current: {current}{NC}")
+    lines.append("")
+    lines.append(
+        f"  {DIM}\u2191\u2193:Navigate  Enter:Open  \u2190/Bksp:Up"
+        f"  s:Select here  /:Type path  q:Cancel{NC}"
+    )
+    lines.append("")
+
+    visible_end = min(scroll_offset + page_size, len(entries))
+
+    if scroll_offset > 0:
+        lines.append(f"  {DIM}  \u2191 {scroll_offset} more{NC}")
+
+    for i in range(scroll_offset, visible_end):
+        name = entries[i]
+        if i == cursor_idx:
+            lines.append(f"  {REVERSE} \u25b8 {name} {NC}")
+        elif name == "../":
+            lines.append(f"    {DIM}{name}{NC}")
+        else:
+            lines.append(f"    {BLUE}{name}{NC}")
+
+    if len(entries) == 1:  # only "../"
+        lines.append(f"    {DIM}(no subdirectories){NC}")
+
+    remaining = len(entries) - visible_end
+    if remaining > 0:
+        lines.append(f"  {DIM}  \u2193 {remaining} more{NC}")
+
+    lines.append("")
+    lines.append(f"  {DIM}[{cursor_idx + 1}/{len(entries)}]{NC}")
+
+    # Overwrite previous frame
+    if prev_lines[0] > 0:
+        sys.stdout.write(f"\033[{prev_lines[0]}A\033[J")
+
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
+    prev_lines[0] = len(lines)
 
 
 def browse_directory(start_path=None, prompt_label="Select directory"):
-    """Interactive terminal directory browser. Returns selected path or None."""
+    """Interactive arrow-key directory browser. Returns selected path or None."""
     if start_path and Path(start_path).is_dir():
         current = Path(start_path).resolve()
     elif sys.platform == "win32":
@@ -169,105 +265,106 @@ def browse_directory(start_path=None, prompt_label="Select directory"):
     else:
         current = Path("/")
 
-    PAGE_SIZE = 15
-
-    while True:
-        print()
-        print(f"  {BOLD}{prompt_label}{NC}")
-        print(f"  {DIM}Current: {current}{NC}")
-        print()
-
+    # Save terminal state on Unix for safety
+    _saved_termios = None
+    if sys.platform != "win32":
+        import termios
         try:
-            dirs = sorted(
-                [d for d in current.iterdir() if d.is_dir() and not d.name.startswith(".")],
-                key=lambda d: d.name.lower(),
-            )
-        except PermissionError:
-            warn(f"Permission denied: {current}")
-            current = current.parent
-            continue
+            _saved_termios = termios.tcgetattr(sys.stdin.fileno())
+        except Exception:
+            pass
 
-        # Show parent option
-        print(f"    {YELLOW} 0{NC})  {DIM}../{NC}  (go up)")
+    prev_lines = [0]
 
-        # Paginate if needed
-        total = len(dirs)
-        page = 0
-        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-
+    try:
         while True:
-            start = page * PAGE_SIZE
-            end = min(start + PAGE_SIZE, total)
-
-            if page == 0:
-                # First display — show dirs
-                pass
-            else:
-                # Re-display for new page
-                print()
-                print(f"  {BOLD}{prompt_label}{NC}")
-                print(f"  {DIM}Current: {current}{NC}")
-                print()
-                print(f"    {YELLOW} 0{NC})  {DIM}../{NC}  (go up)")
-
-            for i, d in enumerate(dirs[start:end], start=start + 1):
-                print(f"    {YELLOW}{i:2d}{NC})  {BLUE}{d.name}/{NC}")
-
-            if total == 0:
-                print(f"    {DIM}(no subdirectories){NC}")
-
-            print()
-            if total_pages > 1:
-                print(f"  {DIM}Page {page + 1}/{total_pages} — type 'n' for next, 'p' for prev{NC}")
-
-            print(f"  {DIM}Enter a number to navigate, '.' to select this folder,{NC}")
-            print(f"  {DIM}a path to jump there, or 'q' to cancel.{NC}")
-
-            choice = ask("> ").strip()
-
-            if not choice:
+            try:
+                dirs = sorted(
+                    [d for d in current.iterdir()
+                     if d.is_dir() and not d.name.startswith(".")],
+                    key=lambda d: d.name.lower(),
+                )
+            except PermissionError:
+                current = current.parent
                 continue
 
-            if choice == "q":
-                return None
+            entries = ["../"] + [d.name + "/" for d in dirs]
+            dir_paths = [current.parent] + dirs
+            cursor_idx = min(1, len(entries) - 1)
+            scroll_offset = 0
+            page_size = max(5, shutil.get_terminal_size().lines - 10)
 
-            if choice == ".":
-                return str(current)
+            _render_browser(prompt_label, current, entries, cursor_idx,
+                            scroll_offset, page_size, prev_lines)
 
-            if choice == "n" and page < total_pages - 1:
-                page += 1
-                continue
+            while True:
+                key = _read_key()
 
-            if choice == "p" and page > 0:
-                page -= 1
-                continue
-
-            # Direct path input
-            if choice.startswith("/") or choice.startswith("~") or (len(choice) >= 2 and choice[1] == ":"):
-                target = Path(os.path.expanduser(choice))
-                if target.is_dir():
-                    current = target.resolve()
+                if key == "up":
+                    cursor_idx = max(0, cursor_idx - 1)
+                elif key == "down":
+                    cursor_idx = min(len(entries) - 1, cursor_idx + 1)
+                elif key == "pageup":
+                    cursor_idx = max(0, cursor_idx - page_size)
+                elif key == "pagedown":
+                    cursor_idx = min(len(entries) - 1, cursor_idx + page_size)
+                elif key == "home":
+                    cursor_idx = 0
+                elif key == "end":
+                    cursor_idx = len(entries) - 1
+                elif key in ("enter", "right"):
+                    target = dir_paths[cursor_idx]
+                    if target.is_dir():
+                        current = target.resolve()
+                        break
+                elif key in ("backspace", "left"):
+                    current = current.parent.resolve()
                     break
+                elif key == "s":
+                    print()
+                    return str(current)
+                elif key == "/":
+                    # Switch to text input for direct path entry
+                    print()
+                    try:
+                        path_str = input(
+                            f"  {YELLOW}[?]{NC} Type path: "
+                        ).strip()
+                    except (EOFError, KeyboardInterrupt):
+                        path_str = ""
+                    if path_str:
+                        target = Path(os.path.expanduser(path_str))
+                        if target.is_dir():
+                            current = target.resolve()
+                        else:
+                            print(f"  {YELLOW}[!]{NC} Not a directory: {path_str}")
+                    prev_lines[0] = 0
+                    break
+                elif key in ("q", "escape"):
+                    print()
+                    return None
                 else:
-                    warn(f"Not a directory: {choice}")
                     continue
 
-            # Number selection
-            try:
-                idx = int(choice)
-            except ValueError:
-                warn("Invalid input")
-                continue
+                # Adjust scroll to keep cursor visible
+                if cursor_idx < scroll_offset:
+                    scroll_offset = cursor_idx
+                if cursor_idx >= scroll_offset + page_size:
+                    scroll_offset = cursor_idx - page_size + 1
 
-            if idx == 0:
-                current = current.parent
-                break
-            elif 1 <= idx <= total:
-                current = dirs[idx - 1]
-                break
-            else:
-                warn(f"Number out of range (0-{total})")
-                continue
+                _render_browser(prompt_label, current, entries, cursor_idx,
+                                scroll_offset, page_size, prev_lines)
+    except Exception:
+        print()
+        return None
+    finally:
+        if _saved_termios is not None:
+            import termios
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
+                                  _saved_termios)
+            except Exception:
+                pass
 
 
 def ask_directory(label, current_value="", default=""):
