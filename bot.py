@@ -59,6 +59,48 @@ def authorized(func):
 
 # --- Helpers ---
 
+AUTO_DELETE_DELAY = 8  # seconds before cleaning up completed flow messages
+
+
+def _track_msg(context: ContextTypes.DEFAULT_TYPE, message):
+    """Track a bot message ID for later cleanup."""
+    msgs = context.user_data.setdefault("_flow_msgs", set())
+    msgs.add((message.chat_id, message.message_id))
+
+
+def _untrack_msg(context: ContextTypes.DEFAULT_TYPE, message):
+    """Remove a message from tracking (e.g. when it's already deleted)."""
+    msgs = context.user_data.get("_flow_msgs")
+    if msgs:
+        msgs.discard((message.chat_id, message.message_id))
+
+
+async def _cleanup_messages(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback: delete tracked flow messages."""
+    chat_id = context.job.data["chat_id"]
+    msg_ids = context.job.data["msg_ids"]
+    for mid in msg_ids:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+
+
+def _schedule_cleanup(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                      extra_msg_ids: list[int] | None = None):
+    """Schedule deletion of all tracked flow messages after a delay."""
+    msgs = context.user_data.pop("_flow_msgs", set())
+    msg_ids = [mid for cid, mid in msgs if cid == chat_id]
+    if extra_msg_ids:
+        msg_ids.extend(extra_msg_ids)
+    if msg_ids:
+        context.application.job_queue.run_once(
+            _cleanup_messages,
+            when=AUTO_DELETE_DELAY,
+            data={"chat_id": chat_id, "msg_ids": msg_ids},
+        )
+
+
 def _format_size(size_bytes: int) -> str:
     gb = size_bytes / (1024 ** 3)
     if gb >= 1:
@@ -191,6 +233,7 @@ async def cmd_deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["recent_cmd_msg_id"] = update.message.message_id
     history = context.user_data.get("search_history", [])
     if not history:
         await update.message.reply_text("No recent searches.")
@@ -200,6 +243,7 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, h in enumerate(history):
         label = f"{h['query']} ({h['media_type']})"
         buttons.append([InlineKeyboardButton(label, callback_data=f"recent:{i}")])
+    buttons.append([InlineKeyboardButton("Close", callback_data="recent:close")])
 
     await update.message.reply_text(
         "Recent searches:",
@@ -216,13 +260,25 @@ async def callback_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Unauthorized.")
         return
 
-    idx = int(query.data.split(":")[1])
+    data = query.data.split(":")[1]
+    if data == "close":
+        cmd_msg_id = context.user_data.pop("recent_cmd_msg_id", None)
+        if cmd_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=query.message.chat_id, message_id=cmd_msg_id)
+            except Exception:
+                pass
+        await query.message.delete()
+        return
+
+    idx = int(data)
     history = context.user_data.get("search_history", [])
     if idx >= len(history):
         await query.edit_message_text("Entry not found.")
         return
 
     h = history[idx]
+    context.user_data.pop("recent_cmd_msg_id", None)
     await query.edit_message_text(f"Searching for: {h['query']} ({h['media_type']})...")
     await _do_search(update, context, h["query"], h["media_type"], edit_msg=query.message)
 
@@ -255,6 +311,7 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"({best.size_display}, {best.seeders} seeders)\n\n"
         f"Download started! Category: {media_type} -> {save_path}"
     )
+    _schedule_cleanup(context, msg.chat_id, [update.message.message_id, msg.message_id])
 
 
 @authorized
@@ -333,6 +390,8 @@ async def callback_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Track user's message for cleanup
+    _track_msg(context, update.message)
     query = update.message.text.strip()
     if not query:
         return
@@ -411,7 +470,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_path = cfg["paths"]["tv"]
         if tv_sub:
             save_path = f"{save_path}/{tv_sub}"
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             f"Adding: {chosen.title}\n"
             f"({chosen.size_display}, {chosen.seeders} seeders)\n\n"
             f"Download started! Category: tv -> {save_path}"
@@ -420,6 +479,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("pending_media_type", None)
         context.user_data.pop("pending_query", None)
         context.user_data.pop("pending_tv_download", None)
+        _schedule_cleanup(context, msg.chat_id, [msg.message_id])
         return
 
     media_type = detect_media_type(query)
@@ -435,10 +495,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("TV Show", callback_data="type:tv"),
             ]
         ]
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             f"Is \"{query}\" a movie or TV show?",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+        _track_msg(context, msg)
 
 
 async def callback_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -469,7 +530,11 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
         if len(history) > 10:
             history.pop()
 
-    msg = edit_msg or await update.message.reply_text(f"Searching for: {query} ({media_type})...")
+    if edit_msg:
+        msg = edit_msg
+    else:
+        msg = await update.message.reply_text(f"Searching for: {query} ({media_type})...")
+        _track_msg(context, msg)
 
     try:
         results = await _search_and_filter(query, media_type)
@@ -499,6 +564,7 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query: 
             f"({best.size_display}, {best.seeders} seeders)\n\n"
             f"Download started! Category: {media_type} -> {save_path}"
         )
+        _schedule_cleanup(context, msg.chat_id)
     else:
         context.user_data["pending_results"] = results
         context.user_data["pending_media_type"] = media_type
@@ -585,6 +651,7 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("pending_results", None)
         context.user_data.pop("pending_media_type", None)
         context.user_data.pop("pending_query", None)
+        _schedule_cleanup(context, query.message.chat_id, [query.message.message_id])
         return
 
     idx = int(data.split(":")[1])
@@ -719,6 +786,7 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_results", None)
     context.user_data.pop("pending_media_type", None)
     context.user_data.pop("pending_query", None)
+    _schedule_cleanup(context, query.message.chat_id, [query.message.message_id])
 
 
 async def callback_tvpath(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -761,6 +829,7 @@ async def callback_tvpath(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("pending_media_type", None)
         context.user_data.pop("pending_query", None)
         context.user_data.pop("pending_tv_download", None)
+        _schedule_cleanup(context, query.message.chat_id, [query.message.message_id])
 
     elif action == "change":
         context.user_data["awaiting_tv_path"] = True
@@ -787,12 +856,18 @@ def _build_status_message(torrents: list[dict]) -> tuple[str, InlineKeyboardMark
             callback_data=f"cancel:{t['hash'][:20]}",
         )])
 
-    buttons.append([InlineKeyboardButton("Refresh", callback_data="status:refresh")])
+    buttons.append([
+        InlineKeyboardButton("Refresh", callback_data="status:refresh"),
+        InlineKeyboardButton("Close", callback_data="status:close"),
+    ])
     return "\n\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 @authorized
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Track the command message so Close can delete it too
+    context.user_data["status_cmd_msg_id"] = update.message.message_id
+
     try:
         torrents = await asyncio.to_thread(qb.get_active_torrents)
     except Exception as e:
@@ -800,20 +875,32 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not torrents:
-        await update.message.reply_text("No active torrents.")
+        await update.message.reply_text("No active torrents.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Close", callback_data="status:close")]]))
         return
 
     text, markup = _build_status_message(torrents)
     await update.message.reply_text(text, reply_markup=markup)
 
 
-async def callback_status_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     user_id = query.from_user.id
     if user_id not in ALLOWED_USERS:
         await query.edit_message_text("Unauthorized.")
+        return
+
+    action = query.data.split(":")[1]
+    if action == "close":
+        # Delete the bot's status message and the user's /status command
+        cmd_msg_id = context.user_data.pop("status_cmd_msg_id", None)
+        if cmd_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=query.message.chat_id, message_id=cmd_msg_id)
+            except Exception:
+                pass
+        await query.message.delete()
         return
 
     try:
@@ -823,7 +910,7 @@ async def callback_status_refresh(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if not torrents:
-        await query.edit_message_text("No active torrents.")
+        await query.edit_message_text("No active torrents.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Close", callback_data="status:close")]]))
         return
 
     text, markup = _build_status_message(torrents)
@@ -1153,6 +1240,7 @@ async def callback_plex(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ok = await plex_api.delete_item(PLEX_URL, PLEX_TOKEN, rating_key)
             if ok:
                 await _plex_edit_or_send(query, context, "Deleted successfully.")
+                _schedule_cleanup(context, query.message.chat_id, [query.message.message_id])
             else:
                 await _plex_edit_or_send(
                     query, context,
@@ -1411,7 +1499,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_tvpath, pattern=r"^tvpath:"))
     app.add_handler(CallbackQueryHandler(callback_quality_toggle, pattern=r"^qtoggle:"))
     app.add_handler(CallbackQueryHandler(callback_settings, pattern=r"^settings:"))
-    app.add_handler(CallbackQueryHandler(callback_status_refresh, pattern=r"^status:refresh$"))
+    app.add_handler(CallbackQueryHandler(callback_status, pattern=r"^status:"))
     app.add_handler(CallbackQueryHandler(callback_cancel_torrent, pattern=r"^cancel:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
