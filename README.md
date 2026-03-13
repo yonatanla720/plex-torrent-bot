@@ -86,6 +86,42 @@ These settings can be changed from the bot using `/settings`:
 
 Or just type a movie/show name to search.
 
+## FAQ / Troubleshooting
+
+**The bot can't reach the Telegram API (WSL2)**
+
+WSL2 sometimes can't resolve `api.telegram.org`. Add an entry to `/etc/hosts`:
+```
+149.154.167.220  api.telegram.org
+```
+
+**qBittorrent says "Unauthorized" or won't connect**
+
+The default credentials are `admin` / `adminadmin`, but newer versions generate a random temporary password on first start. Check the logs:
+```bash
+docker logs qbittorrent 2>&1 | grep "temporary password"
+```
+Then log in at http://localhost:8080 and change the password. Update `config.yaml` to match.
+
+**Jackett indexers fail with Cloudflare errors**
+
+Some indexers (1337x, EZTV) are behind Cloudflare. Install FlareSolverr (the setup wizard offers this) and configure its URL in Jackett's settings as `http://flaresolverr:8191`.
+
+**Downloads go to the wrong folder / Plex doesn't see them**
+
+Make sure `paths.movies` and `paths.tv` in `config.yaml` match your Plex library paths exactly. If running qBittorrent in Docker, the container needs a volume mount for those paths — the setup wizard configures this automatically, but if you changed paths after setup you may need to recreate the container.
+
+**"Another instance is already running" but the bot isn't running**
+
+The bot uses a PID lock file (`bot.pid`). If it wasn't shut down cleanly, the stale lock file may remain:
+```bash
+rm bot.pid
+```
+
+**Port conflicts when creating Docker containers**
+
+If ports 9117 (Jackett), 8080 (qBittorrent), or 8191 (FlareSolverr) are already in use, stop the conflicting service or change the port mapping. For example, to use port 9118 for Jackett, recreate the container with `-p 9118:9117` and update `jackett.url` in `config.yaml`.
+
 ## Architecture
 
 ```
