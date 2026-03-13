@@ -199,6 +199,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "pending_results", "pending_media_type", "pending_query",
         "pending_tv_download", "awaiting_tv_path",
         "awaiting_settings_password", "awaiting_settings_value",
+        "awaiting_auto_query", "plex_active", "settings_cmd_msg_id",
     ]:
         context.user_data.pop(key, None)
     await update.message.reply_text("Cleared. Send a new search anytime.")
@@ -287,7 +288,14 @@ async def callback_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip() if context.args else ""
     if not query:
-        await update.message.reply_text("Usage: /auto <movie or show name>")
+        context.user_data["awaiting_auto_query"] = True
+        context.user_data["auto_cmd_msg_id"] = update.message.message_id
+        await update.message.reply_text(
+            "What do you want to download? Send a movie or show name:",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Cancel", callback_data="auto:cancel")]]
+            ),
+        )
         return
     media_type = detect_media_type(query)
     msg = await update.message.reply_text(f"Searching for: {query} ({media_type})...")
@@ -314,6 +322,22 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _schedule_cleanup(context, msg.chat_id, [update.message.message_id, msg.message_id])
 
 
+async def callback_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("awaiting_auto_query", None)
+    cmd_msg_id = context.user_data.pop("auto_cmd_msg_id", None)
+    if cmd_msg_id:
+        try:
+            await query.message.chat.delete_message(cmd_msg_id)
+        except Exception:
+            pass
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+
 @authorized
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
@@ -325,11 +349,14 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Recent Movies", callback_data="top:movie:recent"),
             InlineKeyboardButton("Recent TV Shows", callback_data="top:tv:recent"),
         ],
+        [InlineKeyboardButton("Close", callback_data="top:close")],
     ]
-    await update.message.reply_text(
+    sent = await update.message.reply_text(
         "Browse torrents:",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+    context.user_data["top_cmd_msg_id"] = update.message.message_id
+    _track_msg(context, sent)
 
 
 async def callback_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -342,6 +369,20 @@ async def callback_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     parts = query.data.split(":")
+
+    if parts[1] == "close":
+        cmd_msg_id = context.user_data.pop("top_cmd_msg_id", None)
+        if cmd_msg_id:
+            try:
+                await query.message.chat.delete_message(cmd_msg_id)
+            except Exception:
+                pass
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        return
+
     media_type = parts[1]
     sort_mode = parts[2] if len(parts) > 2 else "top"
     cat_label = "movies" if media_type == "movie" else "TV shows"
@@ -394,6 +435,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _track_msg(context, update.message)
     query = update.message.text.strip()
     if not query:
+        return
+
+    # Allow text input only for flows that explicitly expect it
+    awaiting_input = (
+        context.user_data.get("awaiting_settings_password")
+        or context.user_data.get("awaiting_settings_value")
+        or context.user_data.get("awaiting_tv_path")
+        or context.user_data.get("awaiting_auto_query")
+    )
+    in_flow = (
+        context.user_data.get("pending_results")
+        or context.user_data.get("plex_active")
+        or context.user_data.get("settings_cmd_msg_id")
+    )
+    if not awaiting_input and in_flow:
+        await update.message.reply_text(
+            "You have an active flow. Use the buttons above, or /clear to cancel."
+        )
         return
 
     # Check if we're waiting for settings password
@@ -482,6 +541,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _schedule_cleanup(context, msg.chat_id, [msg.message_id])
         return
 
+    # Check if we're waiting for an auto search query
+    if context.user_data.pop("awaiting_auto_query", False):
+        media_type = detect_media_type(query)
+        msg = await update.message.reply_text(f"Searching for: {query} ({media_type})...")
+        results = await _search_and_filter(query, media_type)
+        if not results:
+            await msg.edit_text("No results found with enough seeders.")
+            return
+        best = results[0]
+        tv_sub = extract_tv_path(best.title) if media_type == "tv" else ""
+        try:
+            await _add_torrent(best.magnet, media_type, tv_sub)
+        except Exception as e:
+            await msg.edit_text(f"Failed to add torrent: {e}")
+            return
+        save_path = cfg["paths"]["tv"] if media_type == "tv" else cfg["paths"]["movies"]
+        if tv_sub:
+            save_path = f"{save_path}/{tv_sub}"
+        await msg.edit_text(
+            f"Adding: {best.title}\n"
+            f"({best.size_display}, {best.seeders} seeders)\n\n"
+            f"Download started! Category: {media_type} -> {save_path}"
+        )
+        _schedule_cleanup(context, msg.chat_id, [update.message.message_id, msg.message_id])
+        return
+
     media_type = detect_media_type(query)
     if media_type == "tv":
         # Clear episode pattern — skip the prompt
@@ -489,11 +574,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # Ambiguous — ask the user
         context.user_data["pending_query"] = query
+        context.user_data["search_msg_id"] = update.message.message_id
         buttons = [
             [
                 InlineKeyboardButton("Movie", callback_data="type:movie"),
                 InlineKeyboardButton("TV Show", callback_data="type:tv"),
-            ]
+            ],
+            [InlineKeyboardButton("Cancel", callback_data="type:cancel")],
         ]
         msg = await update.message.reply_text(
             f"Is \"{query}\" a movie or TV show?",
@@ -511,7 +598,22 @@ async def callback_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Unauthorized.")
         return
 
-    media_type = query.data.split(":")[1]
+    action = query.data.split(":")[1]
+    if action == "cancel":
+        context.user_data.pop("pending_query", None)
+        search_msg_id = context.user_data.pop("search_msg_id", None)
+        if search_msg_id:
+            try:
+                await query.message.chat.delete_message(search_msg_id)
+            except Exception:
+                pass
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        return
+
+    media_type = action
     pending_query = context.user_data.pop("pending_query", None)
     if not pending_query:
         await query.edit_message_text("Session expired. Send your search again.")
@@ -759,6 +861,7 @@ async def callback_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Confirm", callback_data="tvpath:confirm")],
             [InlineKeyboardButton("Change path", callback_data="tvpath:change")],
             [InlineKeyboardButton("< Back", callback_data=f"pick:{idx}")],
+            [InlineKeyboardButton("Cancel", callback_data="tvpath:cancel")],
         ]
         await _reply_or_edit(
             query, context,
@@ -837,6 +940,14 @@ async def callback_tvpath(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Current path: {tv_dl['tv_sub']}\n\n"
             "Type the new subfolder path (e.g. Show Name/Season 01):"
         )
+
+    elif action == "cancel":
+        context.user_data.pop("pending_results", None)
+        context.user_data.pop("pending_media_type", None)
+        context.user_data.pop("pending_query", None)
+        context.user_data.pop("pending_tv_download", None)
+        await query.edit_message_text("Cancelled.")
+        _schedule_cleanup(context, query.message.chat_id, [query.message.message_id])
 
 
 def _build_status_message(torrents: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
@@ -960,15 +1071,17 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         count = await asyncio.to_thread(qb.clear_completed)
     except Exception as e:
-        await update.message.reply_text(f"Failed to clear: {e}")
+        reply = await update.message.reply_text(f"Failed to clear: {e}")
+        _schedule_cleanup(context, reply.chat_id, [update.message.message_id, reply.message_id])
         return
 
     if count == 0:
-        await update.message.reply_text("No completed torrents to remove.")
+        reply = await update.message.reply_text("No completed torrents to remove.")
     else:
         plex_ok = await _plex_scan()
         plex_note = "\nPlex library scan triggered." if plex_ok else ""
-        await update.message.reply_text(f"Removed {count} completed torrent(s). Files kept on disk.{plex_note}")
+        reply = await update.message.reply_text(f"Removed {count} completed torrent(s). Files kept on disk.{plex_note}")
+    _schedule_cleanup(context, reply.chat_id, [update.message.message_id, reply.message_id])
 
 
 # --- Settings ---
@@ -1022,6 +1135,7 @@ SETTINGS_PROMPTS = {
 
 @authorized
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["settings_cmd_msg_id"] = update.message.message_id
     await update.message.reply_text(_settings_text(), reply_markup=_settings_buttons())
 
 
@@ -1038,7 +1152,16 @@ async def callback_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Close settings
     if action == "close":
-        await query.message.delete()
+        cmd_msg_id = context.user_data.pop("settings_cmd_msg_id", None)
+        if cmd_msg_id:
+            try:
+                await query.message.chat.delete_message(cmd_msg_id)
+            except Exception:
+                pass
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
         return
 
     # Back to main settings view
@@ -1140,6 +1263,8 @@ async def cmd_plex(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{icon} {s['title']}", callback_data=f"plex:section:{s['key']}",
         )])
     buttons.append([InlineKeyboardButton("Close", callback_data="plex:close")])
+    context.user_data["plex_active"] = True
+    context.user_data["plex_cmd_msg_id"] = update.message.message_id
     await update.message.reply_text("Plex Libraries:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
@@ -1197,7 +1322,17 @@ async def callback_plex(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
 
     if action == "close":
-        await query.message.delete()
+        context.user_data.pop("plex_active", None)
+        cmd_msg_id = context.user_data.pop("plex_cmd_msg_id", None)
+        if cmd_msg_id:
+            try:
+                await query.message.chat.delete_message(cmd_msg_id)
+            except Exception:
+                pass
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
         return
 
     if action == "section":
@@ -1489,6 +1624,7 @@ def main():
     app.add_handler(CommandHandler("done", cmd_done))
     app.add_handler(CommandHandler("plex", cmd_plex))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CallbackQueryHandler(callback_auto, pattern=r"^auto:"))
     app.add_handler(CallbackQueryHandler(callback_top, pattern=r"^top:"))
     app.add_handler(CallbackQueryHandler(callback_plex, pattern=r"^plex:"))
     app.add_handler(CallbackQueryHandler(callback_recent, pattern=r"^recent:"))
