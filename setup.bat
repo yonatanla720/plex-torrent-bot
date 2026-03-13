@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 REM Entry point for Windows — installs Python if needed, then runs _setup_wizard.py
 cd /d "%~dp0"
 
@@ -7,16 +8,16 @@ REM --- Find Python 3.10+ ---
 set PYTHON_CMD=
 
 where python >nul 2>&1
-if %errorlevel% equ 0 (
+if !errorlevel! equ 0 (
     python -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" 2>nul
-    if %errorlevel% equ 0 set PYTHON_CMD=python
+    if !errorlevel! equ 0 set PYTHON_CMD=python
 )
 
 if not defined PYTHON_CMD (
     where python3 >nul 2>&1
-    if %errorlevel% equ 0 (
+    if !errorlevel! equ 0 (
         python3 -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" 2>nul
-        if %errorlevel% equ 0 set PYTHON_CMD=python3
+        if !errorlevel! equ 0 set PYTHON_CMD=python3
     )
 )
 
@@ -33,10 +34,10 @@ echo [!] Python 3.10+ not found.
 echo.
 
 where winget >nul 2>&1
-if %errorlevel% equ 0 (
+if !errorlevel! equ 0 (
     echo     Installing Python via winget...
     winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements
-    if %errorlevel% equ 0 (
+    if !errorlevel! equ 0 (
         echo.
         echo [OK] Python installed. Please restart this script.
         pause
