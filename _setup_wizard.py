@@ -219,7 +219,7 @@ def _render_browser(prompt_label, current, entries, cursor_idx, scroll_offset,
     lines.append("")
     lines.append(
         f"  {DIM}\u2191\u2193:Navigate  Enter:Open  \u2190/Bksp:Up"
-        f"  s:Select here  /:Type path  q:Cancel{NC}"
+        f"  s:Select  n:New folder  /:Type path  q:Cancel{NC}"
     )
     lines.append("")
 
@@ -323,6 +323,25 @@ def browse_directory(start_path=None, prompt_label="Select directory"):
                 elif key == "s":
                     print()
                     return str(current)
+                elif key == "n":
+                    # Create a new directory inside current
+                    print()
+                    try:
+                        name = input(
+                            f"  {YELLOW}[?]{NC} New folder name: "
+                        ).strip()
+                    except (EOFError, KeyboardInterrupt):
+                        name = ""
+                    if name:
+                        new_dir = current / name
+                        try:
+                            new_dir.mkdir(parents=True, exist_ok=True)
+                            print(f"  {GREEN}[✓]{NC} Created: {new_dir}")
+                            current = new_dir.resolve()
+                        except Exception as e:
+                            print(f"  {RED}[✗]{NC} Failed: {e}")
+                    prev_lines[0] = 0
+                    break
                 elif key == "/":
                     # Switch to text input for direct path entry
                     print()
