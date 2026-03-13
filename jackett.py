@@ -16,6 +16,7 @@ async def search(
     api_key: str,
     query: str,
     media_type: str,
+    limit: int = 0,
 ) -> list[TorrentResult]:
     """Search Jackett via Torznab API. Returns list of TorrentResult."""
     cat = CAT_TV if media_type == "tv" else CAT_MOVIE
@@ -26,6 +27,8 @@ async def search(
         "q": query,
         "cat": cat,
     }
+    if limit > 0:
+        params["limit"] = str(limit)
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, params=params)

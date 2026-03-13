@@ -84,8 +84,18 @@ async def _search_and_filter(query: str, media_type: str) -> list[TorrentResult]
     )
 
 
-async def _add_torrent(magnet: str, media_type: str, series_name: str = "") -> None:
-    await asyncio.to_thread(qb.add_torrent, magnet, media_type, series_name)
+async def _add_torrent(link: str, media_type: str, series_name: str = "") -> None:
+    if link.startswith("magnet:"):
+        await asyncio.to_thread(qb.add_torrent, link, media_type, series_name)
+    else:
+        # Download .torrent file from Jackett proxy URL, then pass bytes to qBittorrent
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(link)
+            resp.raise_for_status()
+        await asyncio.to_thread(
+            qb.add_torrent, "", media_type, series_name, torrent_file=resp.content,
+        )
 
 
 def _format_eta(seconds: int) -> str:
@@ -128,6 +138,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Just type a movie or show name to search.\n\n"
         "Commands:\n"
         "/auto <query> - Auto-pick best torrent\n"
+        "/top - Browse top torrents by category\n"
         "/status - Show active downloads\n"
         "/recent - Recent searches\n"
         "/settings - View/change settings\n"
@@ -212,6 +223,80 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"({best.size_display}, {best.seeders} seeders)\n\n"
         f"Download started! Category: {media_type} -> {save_path}"
     )
+
+
+@authorized
+async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    buttons = [
+        [
+            InlineKeyboardButton("Top Movies", callback_data="top:movie:top"),
+            InlineKeyboardButton("Top TV Shows", callback_data="top:tv:top"),
+        ],
+        [
+            InlineKeyboardButton("Recent Movies", callback_data="top:movie:recent"),
+            InlineKeyboardButton("Recent TV Shows", callback_data="top:tv:recent"),
+        ],
+    ]
+    await update.message.reply_text(
+        "Browse torrents:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def callback_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in ALLOWED_USERS:
+        await query.edit_message_text("Unauthorized.")
+        return
+
+    parts = query.data.split(":")
+    media_type = parts[1]
+    sort_mode = parts[2] if len(parts) > 2 else "top"
+    cat_label = "movies" if media_type == "movie" else "TV shows"
+    mode_label = "top" if sort_mode == "top" else "recent"
+    await query.edit_message_text(f"Fetching {mode_label} {cat_label}...")
+
+    try:
+        results = await jackett.search(
+            base_url=cfg["jackett"]["url"],
+            api_key=cfg["jackett"]["api_key"],
+            query="",
+            media_type=media_type,
+            limit=20,
+        )
+        # Deduplicate by title (different indexers return same torrents)
+        seen = set()
+        unique = []
+        for r in results:
+            key = r.title.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(r)
+
+        if sort_mode == "recent":
+            # Already sorted by date from Jackett, just deduplicate
+            results = unique[:20]
+        else:
+            # Sort by seeders for "top" view
+            unique.sort(key=lambda r: -r.seeders)
+            results = unique[:20]
+    except Exception as e:
+        await query.edit_message_text(f"Failed to fetch {mode_label} torrents: {e}")
+        return
+
+    if not results:
+        await query.edit_message_text(f"No {mode_label} {cat_label} found.")
+        return
+
+    heading = f"{'Top' if sort_mode == 'top' else 'Recent'} {cat_label}"
+    context.user_data["pending_results"] = results
+    context.user_data["pending_media_type"] = media_type
+    context.user_data["pending_query"] = heading
+    page_size = runtime_settings["max_results"]
+    await _show_page(query.message, results, heading, media_type, page=0, page_size=page_size)
 
 
 @authorized
@@ -432,7 +517,7 @@ async def callback_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = context.user_data.get("pending_results", [])
     media_type = context.user_data.get("pending_media_type", "movie")
     pending_query = context.user_data.get("pending_query", "")
-    page_size = cfg["preferences"]["max_results"]
+    page_size = runtime_settings["max_results"]
 
     if not results:
         await query.edit_message_text("Session expired. Send your search again.")
@@ -479,7 +564,7 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     r = results[idx]
-    page_size = cfg["preferences"]["max_results"]
+    page_size = runtime_settings["max_results"]
     back_page = idx // page_size
 
     desc = r.description.strip() if r.description else ""
@@ -793,6 +878,7 @@ def _settings_buttons() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Mode: auto", callback_data="settings:mode_auto"),
             InlineKeyboardButton("Mode: choose", callback_data="settings:mode_choose"),
         ],
+        [InlineKeyboardButton("Close", callback_data="settings:close")],
     ])
 
 
@@ -830,6 +916,11 @@ async def callback_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     action = query.data.split(":")[1]
+
+    # Close settings
+    if action == "close":
+        await query.message.delete()
+        return
 
     # Back to main settings view
     if action == "back":
@@ -939,6 +1030,7 @@ async def post_init(application):
         BotCommand("done", "Remove completed torrents"),
         BotCommand("recent", "Recent searches"),
         BotCommand("auto", "Auto-pick best torrent"),
+        BotCommand("top", "Browse top torrents"),
         BotCommand("clear", "Cancel current search"),
         BotCommand("settings", "View/change settings"),
     ])
@@ -1005,11 +1097,13 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("auto", cmd_auto))
+    app.add_handler(CommandHandler("top", cmd_top))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("recent", cmd_recent))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("done", cmd_done))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CallbackQueryHandler(callback_top, pattern=r"^top:"))
     app.add_handler(CallbackQueryHandler(callback_recent, pattern=r"^recent:"))
     app.add_handler(CallbackQueryHandler(callback_type, pattern=r"^type:"))
     app.add_handler(CallbackQueryHandler(callback_page, pattern=r"^page:"))
