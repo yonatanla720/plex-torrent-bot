@@ -547,9 +547,10 @@ def main():
 
     pip = get_venv_pip()
     info("Installing Python dependencies...")
-    subprocess.run([pip, "install", "-q", "-r", "requirements.txt"], check=True)
-    subprocess.run([pip, "install", "-q", "python-telegram-bot[job-queue]"], check=True)
-    subprocess.run([pip, "install", "-q", "watchdog"], check=True)
+    pip_flags = ["--disable-pip-version-check", "-q"]
+    subprocess.run([pip, "install", *pip_flags, "-r", "requirements.txt"], check=True)
+    subprocess.run([pip, "install", *pip_flags, "python-telegram-bot[job-queue]"], check=True)
+    subprocess.run([pip, "install", *pip_flags, "watchdog"], check=True)
     info("Python dependencies installed")
 
     # Add venv's site-packages to current process so we can import yaml
