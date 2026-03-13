@@ -16,41 +16,33 @@ A Telegram bot that searches for torrents via Jackett and downloads them through
 
 ## Prerequisites
 
-- Python 3.10+
-- [Jackett](https://github.com/Jackett/Jackett) — torrent indexer proxy
-- [qBittorrent](https://www.qbittorrent.org/) — with Web UI enabled
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
+None — the setup script installs everything for you (Python will be installed if missing)
 
-## Setup
+## Quick Start
 
-1. Clone the repo and create a virtualenv:
+1. Clone and run the setup wizard:
    ```bash
    git clone https://github.com/yonatanla720/plex-torrent-bot.git
    cd plex-torrent-bot
-   python -m venv venv
-   source venv/bin/activate
+   ./setup.sh          # Linux / Mac
+   # or
+   setup.bat            # Windows (double-click or run from cmd)
    ```
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   pip install "python-telegram-bot[job-queue]"
-   ```
+   The setup wizard will:
+   - Create a virtual environment and install all dependencies
+   - Install Docker containers (Jackett, qBittorrent, FlareSolverr)
+   - Walk you through configuring each service step by step
+   - Set up download paths with an interactive directory browser
 
-3. Copy and edit the config:
+2. Run the bot:
    ```bash
-   cp config.yaml.example config.yaml
-   ```
-   Fill in your Telegram bot token, user ID, Jackett URL/API key, qBittorrent credentials, and media paths.
-
-4. Run the bot:
-   ```bash
+   source venv/bin/activate   # Windows: venv\Scripts\activate
    python bot.py
    ```
 
-   For development with auto-reload:
+   For development with auto-reload (Linux/Mac):
    ```bash
-   pip install watchdog
    ./run.sh
    ```
 
