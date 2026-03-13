@@ -47,9 +47,8 @@ def rank_and_filter(
     results: list[TorrentResult],
     quality_prefs: list[str],
     min_seeders: int,
-    max_results: int,
 ) -> list[TorrentResult]:
-    """Filter by min seeders, sort by quality preference then seeders, return top N."""
+    """Filter by min seeders, sort by quality preference then seeders."""
     filtered = [r for r in results if r.seeders >= min_seeders]
     filtered.sort(key=lambda r: (_quality_score(r.title, quality_prefs), -r.seeders))
-    return filtered[:max_results]
+    return filtered
