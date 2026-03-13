@@ -52,6 +52,7 @@ def _parse_torznab(xml_text: str) -> list[TorrentResult]:
         size = _get_torznab_attr(item, "size") or item.findtext("size", "0")
         indexer = item.findtext("jackettindexer", "")
         pub_date = item.findtext("pubDate", "")
+        description = item.findtext("description", "")
 
         results.append(TorrentResult(
             title=title,
@@ -60,6 +61,7 @@ def _parse_torznab(xml_text: str) -> list[TorrentResult]:
             size_bytes=int(size) if size else 0,
             indexer=indexer,
             pub_date=pub_date,
+            description=description,
         ))
 
     return results

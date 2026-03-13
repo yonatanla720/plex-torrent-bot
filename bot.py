@@ -82,6 +82,18 @@ async def _add_torrent(magnet: str, media_type: str, series_name: str = "") -> N
     await asyncio.to_thread(qb.add_torrent, magnet, media_type, series_name)
 
 
+def _format_eta(seconds: int) -> str:
+    if seconds <= 0 or seconds >= 8640000:
+        return "∞"
+    h, remainder = divmod(seconds, 3600)
+    m, s = divmod(remainder, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m"
+    if m > 0:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
 async def _plex_scan() -> bool:
     """Trigger a Plex library scan. Returns True on success."""
     plex_cfg = cfg.get("plex") or {}
@@ -393,6 +405,12 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     page_size = cfg["preferences"]["max_results"]
     back_page = idx // page_size
 
+    desc = r.description.strip() if r.description else ""
+    # Telegram messages have a 4096 char limit; truncate description if needed
+    max_desc_len = 3000
+    if len(desc) > max_desc_len:
+        desc = desc[:max_desc_len] + "..."
+
     detail = (
         f"Title: {r.title}\n"
         f"Size: {r.size_display}\n"
@@ -400,6 +418,8 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Indexer: {r.indexer or 'unknown'}\n"
         f"Uploaded: {r.pub_date or 'unknown'}"
     )
+    if desc:
+        detail += f"\n\nDescription:\n{desc}"
     buttons = [
         [InlineKeyboardButton("Download", callback_data=f"dl:{idx}")],
         [InlineKeyboardButton("< Back to results", callback_data=f"page:{back_page}")],
@@ -534,8 +554,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size = _format_size(t["size"])
         speed = _format_speed(t["dlspeed"])
         cat = t["category"] or "none"
+        eta = _format_eta(t["eta"])
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        lines.append(f"{t['name'][:40]}\n  [{bar}] {pct}% | {size} | {speed} | {cat}")
+        lines.append(f"{t['name'][:40]}\n  [{bar}] {pct}% | {size} | {speed} | ETA {eta} | {cat}")
 
     await update.message.reply_text("\n\n".join(lines))
 

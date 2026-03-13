@@ -17,6 +17,7 @@ class TorrentResult:
     size_bytes: int
     indexer: str = ""
     pub_date: str = ""
+    description: str = ""
 
     @property
     def size_display(self) -> str:

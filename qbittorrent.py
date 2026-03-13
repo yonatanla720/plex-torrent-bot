@@ -56,6 +56,7 @@ class QBitClient:
                 "size": t.total_size,
                 "dlspeed": t.dlspeed,
                 "category": t.category,
+                "eta": t.eta,
             })
         return active
 
