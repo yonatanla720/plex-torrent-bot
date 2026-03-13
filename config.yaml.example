@@ -1,0 +1,26 @@
+telegram:
+  bot_token: "YOUR_BOT_TOKEN"
+  allowed_users: [YOUR_TELEGRAM_ID]
+
+jackett:
+  url: "http://localhost:9117"
+  api_key: "YOUR_JACKETT_API_KEY"
+
+qbittorrent:
+  host: "localhost"
+  port: 8080
+  username: "admin"
+  password: "adminadmin"
+
+paths:
+  movies: "/mnt/media/Movies"
+  tv: "/mnt/media/TV Shows"
+
+proxy:
+  # url: "socks5://127.0.0.1:1080"  # Uncomment if Telegram is blocked
+
+preferences:
+  quality: ["1080p", "720p", "2160p"]
+  min_seeders: 3
+  max_results: 5
+  default_mode: "auto"   # "auto" or "choose"
