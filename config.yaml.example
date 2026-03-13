@@ -24,3 +24,4 @@ preferences:
   min_seeders: 3
   max_results: 5
   default_mode: "choose"   # "auto" or "choose"
+  settings_password: ""     # Password to change settings via bot; leave empty to disable

@@ -18,6 +18,8 @@ class TorrentResult:
     indexer: str = ""
     pub_date: str = ""
     description: str = ""
+    leechers: int = 0
+    info_url: str = ""
 
     @property
     def size_display(self) -> str:
@@ -88,8 +90,12 @@ def rank_and_filter(
     results: list[TorrentResult],
     quality_prefs: list[str],
     min_seeders: int,
+    max_size_gb: float = 0,
 ) -> list[TorrentResult]:
-    """Filter by min seeders, sort by quality preference then seeders."""
+    """Filter by min seeders and max size, sort by quality preference then seeders."""
     filtered = [r for r in results if r.seeders >= min_seeders]
+    if max_size_gb > 0:
+        max_bytes = max_size_gb * (1024 ** 3)
+        filtered = [r for r in filtered if r.size_bytes <= max_bytes]
     filtered.sort(key=lambda r: (_quality_score(r.title, quality_prefs), -r.seeders))
     return filtered

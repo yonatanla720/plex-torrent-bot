@@ -30,7 +30,7 @@ def load_config(path: str = "config.yaml") -> dict:
             print(f"Missing config: {section}.{key}")
             sys.exit(1)
 
-    # Defaults for preferences
+    # Defaults for preferences (from config.yaml, read-only)
     prefs = cfg.setdefault("preferences", {})
     prefs.setdefault("quality", ["1080p", "720p", "2160p"])
     prefs.setdefault("min_seeders", 3)
@@ -38,3 +38,28 @@ def load_config(path: str = "config.yaml") -> dict:
     prefs.setdefault("default_mode", "auto")
 
     return cfg
+
+
+SETTINGS_PATH = Path("settings.yaml")
+
+# Keys that can be changed at runtime via the bot
+SETTINGS_DEFAULTS = {
+    "max_size_gb": 0,
+}
+
+
+def load_settings() -> dict:
+    """Load runtime-editable settings from settings.yaml, with defaults."""
+    settings = dict(SETTINGS_DEFAULTS)
+    if SETTINGS_PATH.exists():
+        with open(SETTINGS_PATH) as f:
+            data = yaml.safe_load(f)
+        if isinstance(data, dict):
+            settings.update(data)
+    return settings
+
+
+def save_settings(settings: dict) -> None:
+    """Write runtime-editable settings to settings.yaml."""
+    with open(SETTINGS_PATH, "w") as f:
+        yaml.dump(settings, f, default_flow_style=False, sort_keys=False)

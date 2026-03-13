@@ -1,5 +1,6 @@
 venv/
 __pycache__/
 config.yaml
+settings.yaml
 bot_data.pickle
 .claude/

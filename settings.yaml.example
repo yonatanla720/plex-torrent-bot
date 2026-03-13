@@ -1,0 +1,2 @@
+# Runtime settings (editable via /settings in the bot)
+max_size_gb: 0    # 0 = no limit; e.g. 15 to skip anything over 15 GB

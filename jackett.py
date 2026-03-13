@@ -49,10 +49,12 @@ def _parse_torznab(xml_text: str) -> list[TorrentResult]:
             continue
 
         seeders = _get_torznab_attr(item, "seeders")
+        leechers = _get_torznab_attr(item, "peers")
         size = _get_torznab_attr(item, "size") or item.findtext("size", "0")
         indexer = item.findtext("jackettindexer", "")
         pub_date = item.findtext("pubDate", "")
         description = item.findtext("description", "")
+        info_url = item.findtext("comments", "") or item.findtext("guid", "")
 
         results.append(TorrentResult(
             title=title,
@@ -62,6 +64,8 @@ def _parse_torznab(xml_text: str) -> list[TorrentResult]:
             indexer=indexer,
             pub_date=pub_date,
             description=description,
+            leechers=int(leechers) if leechers else 0,
+            info_url=info_url,
         ))
 
     return results

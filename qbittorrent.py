@@ -50,6 +50,7 @@ class QBitClient:
                 ):
                     continue
             active.append({
+                "hash": t.hash,
                 "name": t.name,
                 "progress": t.progress,
                 "state": t.state,
@@ -59,6 +60,18 @@ class QBitClient:
                 "eta": t.eta,
             })
         return active
+
+    def cancel_torrent(self, torrent_hash: str, delete_files: bool = False) -> None:
+        """Cancel and remove a torrent by hash."""
+        self.client.torrents_delete(delete_files=delete_files, torrent_hashes=[torrent_hash])
+
+    def get_all_torrent_states(self) -> dict[str, dict]:
+        """Return a dict of hash -> {name, is_complete} for all torrents."""
+        torrents = self.client.torrents_info(status_filter="all")
+        return {
+            t.hash: {"name": t.name, "is_complete": t.progress >= 1.0}
+            for t in torrents
+        }
 
     def clear_completed(self) -> int:
         """Remove completed torrents from qBittorrent. Returns count removed."""

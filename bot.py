@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 import jackett
-from config import load_config
+from config import load_config, load_settings, save_settings
 from media import TorrentResult, detect_media_type, extract_tv_path, rank_and_filter
 from qbittorrent import QBitClient
 
@@ -24,6 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 cfg = load_config()
+runtime_settings = load_settings()
 qb = QBitClient(
     host=cfg["qbittorrent"]["host"],
     port=cfg["qbittorrent"]["port"],
@@ -75,6 +76,7 @@ async def _search_and_filter(query: str, media_type: str) -> list[TorrentResult]
         results,
         quality_prefs=prefs["quality"],
         min_seeders=prefs["min_seeders"],
+        max_size_gb=runtime_settings.get("max_size_gb", 0),
     )
 
 
@@ -124,6 +126,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/auto <query> - Auto-pick best torrent\n"
         "/status - Show active downloads\n"
         "/recent - Recent searches\n"
+        "/settings - View/change settings\n"
         "/clear - Cancel current search"
     )
 
@@ -206,6 +209,39 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
     if not query:
+        return
+
+    # Check if we're waiting for settings password
+    if context.user_data.get("awaiting_settings_password"):
+        setting = context.user_data.pop("awaiting_settings_password")
+        password = cfg["preferences"].get("settings_password", "")
+        if query != password:
+            await update.message.reply_text("Wrong password.")
+            return
+        context.user_data["awaiting_settings_value"] = setting
+        if setting == "maxsize":
+            current = runtime_settings.get("max_size_gb", 0)
+            await update.message.reply_text(
+                f"Current max size: {current} GB (0 = no limit)\n\n"
+                "Enter new max size in GB:"
+            )
+        return
+
+    # Check if we're waiting for a settings value
+    if context.user_data.get("awaiting_settings_value"):
+        setting = context.user_data.pop("awaiting_settings_value")
+        if setting == "maxsize":
+            try:
+                value = float(query)
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text("Invalid value. Enter a number (0 = no limit).")
+                return
+            runtime_settings["max_size_gb"] = value
+            save_settings(runtime_settings)
+            display = f"{value} GB" if value > 0 else "No limit"
+            await update.message.reply_text(f"Max torrent size set to: {display}")
         return
 
     # Check if we're waiting for a custom TV path
@@ -414,7 +450,7 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     detail = (
         f"Title: {r.title}\n"
         f"Size: {r.size_display}\n"
-        f"Seeders: {r.seeders}\n"
+        f"Seeders: {r.seeders} | Leechers: {r.leechers}\n"
         f"Indexer: {r.indexer or 'unknown'}\n"
         f"Uploaded: {r.pub_date or 'unknown'}"
     )
@@ -422,8 +458,10 @@ async def callback_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         detail += f"\n\nDescription:\n{desc}"
     buttons = [
         [InlineKeyboardButton("Download", callback_data=f"dl:{idx}")],
-        [InlineKeyboardButton("< Back to results", callback_data=f"page:{back_page}")],
     ]
+    if r.info_url and r.info_url.startswith("http"):
+        buttons.append([InlineKeyboardButton("View on indexer", url=r.info_url)])
+    buttons.append([InlineKeyboardButton("< Back to results", callback_data=f"page:{back_page}")])
     await query.edit_message_text(detail, reply_markup=InlineKeyboardMarkup(buttons))
 
 
@@ -536,6 +574,27 @@ async def callback_tvpath(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+def _build_status_message(torrents: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
+    """Build status text and inline keyboard from torrent list."""
+    lines = []
+    buttons = []
+    for i, t in enumerate(torrents[:15]):
+        pct = int(t["progress"] * 100)
+        size = _format_size(t["size"])
+        speed = _format_speed(t["dlspeed"])
+        cat = t["category"] or "none"
+        eta = _format_eta(t["eta"])
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        lines.append(f"{i + 1}. {t['name'][:40]}\n  [{bar}] {pct}% | {size} | {speed} | ETA {eta} | {cat}")
+        buttons.append([InlineKeyboardButton(
+            f"Cancel #{i + 1}: {t['name'][:30]}",
+            callback_data=f"cancel:{t['hash'][:20]}",
+        )])
+
+    buttons.append([InlineKeyboardButton("Refresh", callback_data="status:refresh")])
+    return "\n\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
 @authorized
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -548,17 +607,69 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No active torrents.")
         return
 
-    lines = []
-    for t in torrents[:15]:
-        pct = int(t["progress"] * 100)
-        size = _format_size(t["size"])
-        speed = _format_speed(t["dlspeed"])
-        cat = t["category"] or "none"
-        eta = _format_eta(t["eta"])
-        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        lines.append(f"{t['name'][:40]}\n  [{bar}] {pct}% | {size} | {speed} | ETA {eta} | {cat}")
+    text, markup = _build_status_message(torrents)
+    await update.message.reply_text(text, reply_markup=markup)
 
-    await update.message.reply_text("\n\n".join(lines))
+
+async def callback_status_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in ALLOWED_USERS:
+        await query.edit_message_text("Unauthorized.")
+        return
+
+    try:
+        torrents = await asyncio.to_thread(qb.get_active_torrents)
+    except Exception as e:
+        await query.edit_message_text(f"Failed to get status: {e}")
+        return
+
+    if not torrents:
+        await query.edit_message_text("No active torrents.")
+        return
+
+    text, markup = _build_status_message(torrents)
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+async def callback_cancel_torrent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in ALLOWED_USERS:
+        await query.edit_message_text("Unauthorized.")
+        return
+
+    partial_hash = query.data.split(":")[1]
+
+    try:
+        # Find the full hash by prefix match
+        torrents = await asyncio.to_thread(qb.get_active_torrents)
+        match = next((t for t in torrents if t["hash"].startswith(partial_hash)), None)
+        if not match:
+            await query.edit_message_text("Torrent not found (may have already finished).")
+            return
+
+        await asyncio.to_thread(qb.cancel_torrent, match["hash"])
+    except Exception as e:
+        await query.edit_message_text(f"Failed to cancel: {e}")
+        return
+
+    # Refresh the status view
+    try:
+        torrents = await asyncio.to_thread(qb.get_active_torrents)
+    except Exception:
+        torrents = []
+
+    if not torrents:
+        await query.edit_message_text(f"Cancelled: {match['name']}\n\nNo active torrents.")
+        return
+
+    text, markup = _build_status_message(torrents)
+    await query.edit_message_text(f"Cancelled: {match['name']}\n\n{text}", reply_markup=markup)
 
 
 @authorized
@@ -577,6 +688,82 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Removed {count} completed torrent(s). Files kept on disk.{plex_note}")
 
 
+# --- Settings ---
+
+@authorized
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prefs = cfg["preferences"]
+    max_size = runtime_settings.get("max_size_gb", 0)
+    size_display = f"{max_size} GB" if max_size > 0 else "No limit"
+
+    text = (
+        "Settings:\n\n"
+        f"Max torrent size: {size_display}\n"
+        f"Min seeders: {prefs['min_seeders']}\n"
+        f"Quality: {', '.join(prefs['quality'])}\n"
+        f"Results per page: {prefs['max_results']}\n"
+        f"Mode: {prefs['default_mode']}"
+    )
+    buttons = [
+        [InlineKeyboardButton("Change max size", callback_data="settings:maxsize")],
+    ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def callback_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in ALLOWED_USERS:
+        await query.edit_message_text("Unauthorized.")
+        return
+
+    action = query.data.split(":")[1]
+    if action == "maxsize":
+        password = cfg["preferences"].get("settings_password", "")
+        if password:
+            context.user_data["awaiting_settings_password"] = "maxsize"
+            await query.edit_message_text("Enter settings password:")
+        else:
+            context.user_data["awaiting_settings_value"] = "maxsize"
+            current = runtime_settings.get("max_size_gb", 0)
+            await query.edit_message_text(
+                f"Current max size: {current} GB (0 = no limit)\n\n"
+                "Enter new max size in GB:"
+            )
+
+
+# --- Download completion notifications ---
+
+_known_torrents: dict[str, bool] = {}  # hash -> was_complete
+
+
+async def _check_completed(context: ContextTypes.DEFAULT_TYPE):
+    """Background job: notify users when torrents finish downloading."""
+    global _known_torrents
+    try:
+        states = await asyncio.to_thread(qb.get_all_torrent_states)
+    except Exception:
+        return
+
+    newly_completed = []
+    for h, info in states.items():
+        was_complete = _known_torrents.get(h)
+        if info["is_complete"] and was_complete is False:
+            newly_completed.append(info["name"])
+
+    _known_torrents = {h: info["is_complete"] for h, info in states.items()}
+
+    if newly_completed:
+        text = "Download complete:\n" + "\n".join(f"- {name}" for name in newly_completed)
+        for user_id in ALLOWED_USERS:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=text)
+            except Exception:
+                pass
+
+
 async def post_init(application):
     from telegram import BotCommand
     await application.bot.set_my_commands([
@@ -585,6 +772,7 @@ async def post_init(application):
         BotCommand("recent", "Recent searches"),
         BotCommand("auto", "Auto-pick best torrent"),
         BotCommand("clear", "Cancel current search"),
+        BotCommand("settings", "View/change settings"),
     ])
 
 
@@ -620,13 +808,28 @@ def main():
     app.add_handler(CommandHandler("recent", cmd_recent))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("done", cmd_done))
+    app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CallbackQueryHandler(callback_recent, pattern=r"^recent:"))
     app.add_handler(CallbackQueryHandler(callback_type, pattern=r"^type:"))
     app.add_handler(CallbackQueryHandler(callback_page, pattern=r"^page:"))
     app.add_handler(CallbackQueryHandler(callback_pick, pattern=r"^pick:"))
     app.add_handler(CallbackQueryHandler(callback_download, pattern=r"^dl:"))
     app.add_handler(CallbackQueryHandler(callback_tvpath, pattern=r"^tvpath:"))
+    app.add_handler(CallbackQueryHandler(callback_settings, pattern=r"^settings:"))
+    app.add_handler(CallbackQueryHandler(callback_status_refresh, pattern=r"^status:refresh$"))
+    app.add_handler(CallbackQueryHandler(callback_cancel_torrent, pattern=r"^cancel:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Seed known torrents so existing ones don't trigger false notifications
+    global _known_torrents
+    try:
+        states = qb.get_all_torrent_states()
+        _known_torrents = {h: info["is_complete"] for h, info in states.items()}
+    except Exception:
+        pass
+
+    # Poll for completed downloads every 30 seconds
+    app.job_queue.run_repeating(_check_completed, interval=30, first=10)
 
     logger.info("Bot starting...")
     app.run_polling()
