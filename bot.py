@@ -142,7 +142,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status - Show active downloads\n"
         "/recent - Recent searches\n"
         "/settings - View/change settings\n"
-        "/clear - Cancel current search"
+        "/clear - Cancel current search\n"
+        "/deleteall - Delete all messages"
     )
 
 
@@ -155,6 +156,33 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]:
         context.user_data.pop(key, None)
     await update.message.reply_text("Cleared. Send a new search anytime.")
+
+
+@authorized
+async def cmd_deleteall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete all messages in the chat (up to Telegram's 48-hour limit)."""
+    chat_id = update.effective_chat.id
+    current_msg_id = update.message.message_id
+    deleted = 0
+    # Telegram allows bulk deletion of up to 100 messages at a time
+    # Work backwards from the current message
+    batch = []
+    for msg_id in range(current_msg_id, max(current_msg_id - 2000, 0), -1):
+        batch.append(msg_id)
+        if len(batch) == 100:
+            try:
+                await context.bot.delete_messages(chat_id=chat_id, message_ids=batch)
+                deleted += len(batch)
+            except Exception:
+                # Messages too old or already deleted — stop
+                break
+            batch = []
+    if batch:
+        try:
+            await context.bot.delete_messages(chat_id=chat_id, message_ids=batch)
+            deleted += len(batch)
+        except Exception:
+            pass
 
 
 @authorized
@@ -1032,6 +1060,7 @@ async def post_init(application):
         BotCommand("auto", "Auto-pick best torrent"),
         BotCommand("top", "Browse top torrents"),
         BotCommand("clear", "Cancel current search"),
+        BotCommand("deleteall", "Delete all messages"),
         BotCommand("settings", "View/change settings"),
     ])
 
@@ -1099,6 +1128,7 @@ def main():
     app.add_handler(CommandHandler("auto", cmd_auto))
     app.add_handler(CommandHandler("top", cmd_top))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("deleteall", cmd_deleteall))
     app.add_handler(CommandHandler("recent", cmd_recent))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("done", cmd_done))
